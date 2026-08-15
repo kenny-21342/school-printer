@@ -11,8 +11,10 @@ final class PreviewCache: ObservableObject {
     @Published var spoolFile: String?
     @Published var error: String?
 
-    var api: APIClient
-    init(api: APIClient) { self.api = api }
+    /// Injected from the environment once the view appears. Optional rather
+    /// than a throwaway placeholder instance: the old code constructed a second
+    /// APIClient in PrintView.init() whose @Published state nothing observed.
+    var api: APIClient?
 
     var pageCount: Int { pdfInfo?.pages ?? 0 }
 
@@ -20,16 +22,24 @@ final class PreviewCache: ObservableObject {
     private var pdfDocument: PDFDocument?
     private var localFileURL: URL?
 
-    func loadInfo(fileURL: URL, filename: String, mime: String) async {
+    /// True when the picked file has no page preview available (image, text).
+    /// Distinct from "still loading", so the UI can stop showing a spinner
+    /// forever for files it will never be able to preview.
+    @Published var previewUnavailable = false
+
+    /// Inspect the picked file. Everything happens on-device — no upload.
+    func loadInfo(fileURL: URL) async {
         error = nil; thumbnails.removeAll(); loadedPages.removeAll()
         localFileURL = fileURL
         pdfDocument = nil
+        spoolFile = nil
+        previewUnavailable = false
 
         // For PDFs: render locally with PDFKit — instant, no upload needed.
         let accessing = fileURL.startAccessingSecurityScopedResource()
         defer { if accessing { fileURL.stopAccessingSecurityScopedResource() } }
 
-        if let doc = PDFDocument(url: fileURL) {
+        if let doc = PDFDocument(url: fileURL), doc.pageCount > 0 {
             self.pdfDocument = doc
             self.pdfInfo = PdfInfo(
                 pages: doc.pageCount,
@@ -41,23 +51,24 @@ final class PreviewCache: ObservableObject {
             return
         }
 
-        // Non-PDF (image, text, Office): fall back to server for info.
-        do {
-            let info = try await api.uploadForInfo(fileURL: fileURL, filename: filename, mimeType: mime)
-            self.pdfInfo = info
-            self.spoolFile = info.spool_file
-        } catch {
-            self.error = error.localizedDescription
-        }
+        // Not a PDF. Do NOT upload it to /pdf-info: the server cannot compute a
+        // page count for non-PDFs (it returns pages: 0 and discards the file),
+        // so the old fallback burned a full upload of the user's document over
+        // school Wi-Fi to learn nothing.
+        self.pdfInfo = PdfInfo(
+            pages: 0, page_size: nil, is_pdf: false,
+            spool_file: nil, needs_conversion: false
+        )
+        self.previewUnavailable = true
     }
 
     /// Render a page locally via PDFKit (no network). Falls back to server for non-PDFs.
     func ensureLoaded(_ page: Int) async {
         guard !loadedPages.contains(page) else { return }
-        loadedPages.insert(page)
 
         // Local PDF rendering
         if let doc = pdfDocument, let pdfPage = doc.page(at: page - 1) {
+            loadedPages.insert(page)
             let bounds = pdfPage.bounds(for: .mediaBox)
             let scale = min(400.0 / bounds.width, 400.0 / bounds.height)
             let sz = CGSize(width: bounds.width * scale, height: bounds.height * scale)
@@ -75,15 +86,19 @@ final class PreviewCache: ObservableObject {
             return
         }
 
-        // Server fallback for non-PDFs
-        guard let sf = spoolFile else { loadedPages.remove(page); return }
+        // Server fallback, used only when a spool file was registered.
+        // `loadedPages` is marked only on success (M9): the old code inserted
+        // up front and removed on failure only in this branch, so a failed
+        // local render left a permanent spinner.
+        guard let sf = spoolFile, let api else { return }
         do {
             let prev = try await api.fetchPreview(spoolFile: sf, page: page, width: 400)
             if let img = UIImage(data: Data(base64Encoded: prev.image_base64) ?? Data()) {
                 thumbnails[page] = img
+                loadedPages.insert(page)
             }
         } catch {
-            loadedPages.remove(page)
+            // leave the page unloaded so it can be retried
         }
     }
 
@@ -102,17 +117,17 @@ final class PreviewCache: ObservableObject {
             return
         }
 
-        // Server path: bounded concurrency
-        await withTaskGroup(of: Void.self) { group in
-            var inflight = 0
-            let maxConcurrent = 3
-            while !toFetch.isEmpty || inflight > 0 {
-                while inflight < maxConcurrent, let page = toFetch.popLast() {
-                    inflight += 1
+        // Server path: bounded concurrency. Rewritten as a simple chunked loop —
+        // the previous hand-rolled inflight counter could decrement below zero
+        // when group.next() returned nil.
+        let maxConcurrent = 3
+        for chunk in stride(from: 0, to: toFetch.count, by: maxConcurrent).map({
+            Array(toFetch[$0..<min($0 + maxConcurrent, toFetch.count)])
+        }) {
+            await withTaskGroup(of: Void.self) { group in
+                for page in chunk {
                     group.addTask { [weak self] in await self?.ensureLoaded(page) }
                 }
-                _ = await group.next()
-                inflight -= 1
             }
         }
     }
@@ -211,8 +226,13 @@ struct PrintOptionsView: View {
         ("", "Default"), ("fit", "Fit to page"), ("actual", "Actual size"), ("shrink", "Shrink to fit"), ("custom", "Custom %"),
     ]
     private var layoutDirections: [(String, String)] = [
-        ("", "Left-to-right"), ("ltr", "Left-to-right"), ("rtl", "Right-to-left"),
+        ("", "Default"), ("ltr", "Left-to-right"), ("rtl", "Right-to-left"),
     ]
+
+    /// Page selection only makes sense when we know how many pages there are.
+    /// For images and text files pageCount is 0 — building `1...pageCount`
+    /// ranges in that state is a fatal error, so the controls are disabled.
+    private var canSelectPages: Bool { pageCount > 0 }
 
     /// The scaling factor to apply to the preview thumbnails (0.01 – 4.0).
     /// Driven by the custom percentage text field — updates live as you type.
@@ -241,8 +261,23 @@ struct PrintOptionsView: View {
         }
         .padding(.vertical, 8)
         .onChange(of: rangeMode) { _, newMode in
-            if newMode == .pick { pickedPages = Set(1...pageCount) }
+            // Guard the range construction: `Set(1...0)` traps at runtime.
+            if newMode == .pick {
+                pickedPages = canSelectPages ? Set(1...pageCount) : []
+            }
             syncOption()
+        }
+        .onChange(of: pageCount) { _, newCount in
+            // Clamp any stale selection when a new file is picked.
+            guard newCount > 0 else {
+                rangeMode = .all
+                pickedPages = []
+                rangeFrom = 1; rangeTo = 1
+                syncOption()
+                return
+            }
+            rangeFrom = min(rangeFrom, newCount)
+            rangeTo = min(max(rangeTo, rangeFrom), newCount)
         }
         .onChange(of: scalePercent) { _, new in
             if let pct = Int(new), (1...400).contains(pct) {
@@ -271,6 +306,18 @@ struct PrintOptionsView: View {
 
             if preview.error != nil {
                 Text(preview.error!).foregroundStyle(.red).font(.footnote).padding(.horizontal)
+            } else if preview.previewUnavailable {
+                // Explicit terminal state. Previously this case fell into the
+                // "Loading preview…" branch and span forever, because the
+                // server cannot page-render a non-PDF.
+                VStack(spacing: 6) {
+                    Image(systemName: "doc")
+                        .font(.system(size: 34, weight: .ultraLight))
+                        .foregroundStyle(.tertiary)
+                    Text("No preview for this file type")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity).padding(.vertical, 24)
             } else if pageCount == 0 {
                 HStack { ProgressView(); Text("Loading preview…") }
                     .frame(maxWidth: .infinity).padding()
@@ -307,13 +354,19 @@ struct PrintOptionsView: View {
                 ForEach(PageRangeMode.allCases) { m in Text(m.label).tag(m) }
             }
             .pickerStyle(.segmented).padding(.horizontal)
+            .disabled(!canSelectPages)
 
+            if !canSelectPages {
+                Text("This file will be printed in full — page selection needs a PDF.")
+                    .font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+            } else {
             switch rangeMode {
             case .all:
                 Text("All \(pageCount) pages")
                     .foregroundStyle(.secondary).font(.subheadline).padding(.horizontal)
             case .range:
                 HStack {
+                    // Ranges are safe here: canSelectPages guarantees pageCount >= 1.
                     Stepper("From \(rangeFrom)", value: $rangeFrom, in: 1...pageCount)
                         .onChange(of: rangeFrom) { _, _ in
                             if rangeTo < rangeFrom { rangeTo = rangeFrom }
@@ -340,6 +393,7 @@ struct PrintOptionsView: View {
                 if !customText.isEmpty, parseCustomPages(customText, max: pageCount) == nil {
                     Text("Invalid page range").foregroundStyle(.red).font(.caption).padding(.horizontal)
                 }
+            }
             }
         }
         .padding(.vertical, 6)
@@ -480,8 +534,11 @@ struct CarouselView: View {
         VStack(spacing: 8) {
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: true) {
-                    HStack(spacing: isPad ? 20 : 14) {
-                        ForEach(1...pageCount, id: \.self) { page in
+                    // LazyHStack, not HStack: a plain HStack instantiates every
+                    // cell up front, and each cell's .task renders a PDFKit
+                    // thumbnail on the main actor — a 300-page PDF hung the app.
+                    LazyHStack(spacing: isPad ? 20 : 14) {
+                        ForEach(1...max(1, pageCount), id: \.self) { page in
                             PageThumbCell(
                                 page: page,
                                 image: preview.thumbnail(for: page),

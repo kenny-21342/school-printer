@@ -19,11 +19,12 @@ targets:
       - path: SchoolPrinter
         excludes:
           - "Info.plist"
+    # NOTE: this was previously two separate `settings:` keys. YAML keeps only
+    # the last, so ASSETCATALOG_COMPILER_APPICON_NAME was silently dropped and
+    # regenerating the project lost the app icon. Keep this as ONE block.
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-    settings:
-      base:
         PRODUCT_BUNDLE_IDENTIFIER: com.kenny.schoolprinter
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"

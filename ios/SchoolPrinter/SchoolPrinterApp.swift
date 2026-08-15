@@ -23,14 +23,14 @@ struct RootView: View {
                 LoginView()
             }
         }
+        // sessionID changes whenever the session is established or cleared,
+        // which forces this Group to re-evaluate api.isLoggedIn.
+        .id(api.sessionID)
         .task {
-            // validate token on launch
-            if api.isLoggedIn {
-                _ = try? await api.me()
-                if !api.isLoggedIn {
-                    // me() failed with 401 -> token cleared -> show login
-                }
-            }
+            // Validate the stored token on launch. A 401 inside validateSession
+            // clears the token (see APIClient.handle), so an expired session
+            // lands on LoginView instead of a tab view where every screen errors.
+            await api.validateSession()
         }
     }
 }

@@ -11,9 +11,14 @@ iPhone/iPad → Raspberry Pi → FUJIFILM Xerox "bw" (`lpd://10.2.20.170/sjbw`)
 └─────────────┘                       └──────────────────────┘           └────────────────┘
 ```
 
-- iOS picks a file (PDF, Office, image, text) → uploads to Pi
+- iOS picks a file (PDF, JPEG, PNG, text) → uploads to Pi
 - Pi authenticates the user (per-user JWT, SQLite), spools file, calls `lp -d bw`
-- CUPS sends raw PDF over LPD to the printer
+- CUPS sends the PDF over LPD to the printer
+
+> **Office files are not supported yet.** Word/Excel/PowerPoint uploads are
+> rejected with a clear message asking the user to export to PDF. The iMac
+> conversion service in `imac/` is a design sketch that was never wired up —
+> previously these files were accepted, queued forever, and never printed.
 
 ## Project layout
 
@@ -110,16 +115,57 @@ Default server is `http://192.168.1.106:8000`; users can override in Settings.
 
 ## Security notes
 
-- All auth is JWT (HS256, 7-day expiry). Tokens stored in `UserDefaults`
-  (consider Keychain for production distribution).
+- All auth is JWT (HS256, 7-day expiry). Tokens are stored in the **Keychain**.
+  Changing a password bumps `token_version`, which revokes every existing token.
 - Passwords hashed with argon2.
+- Login throttling is **per username** (10 failures → 5-minute lockout), not per
+  IP: behind school NAT the whole school shares one address.
 - UFW only allows 22, 3389, Samba, 8000 from LAN.
 - systemd service runs with `ProtectSystem=full`, `MemoryMax=1G`, no new privs.
 - File uploads limited to 50 MB, MIME-type allowlist.
-- Rate limit: 10 logins/min, 30 prints/min per IP.
+- Spool files are deleted once a job finishes, and swept hourly
+  (`SP_SPOOL_RETENTION_HOURS`).
+- `deploy.sh` takes the sudo password from the `SUDO_PW` environment variable —
+  never hardcode it. If you previously used the committed default, rotate it.
 
 ## Known limitations
 
 - The Pi can't reach the printer from home (different subnet). Printer will be
   testable once the Pi is at school.
 - Plain HTTP only. Add TLS before relying on this for real student data.
+- **iOS only.** Windows, Android and Chromebook users are not served, despite
+  that being the original goal. There is also no app-distribution story: an
+  unsigned build expires after 7 days and needs a Mac + Xcode per device.
+- Office formats need an export to PDF first (see above).
+
+## Open item: is the `bw` queue raw?
+
+If `bw` was created without a PPD/driver, CUPS passes files through untouched
+and **silently ignores** page ranges, duplex, paper size, orientation and
+scaling — meaning the whole print-options UI would control nothing. This has
+not been verified because the Pi has been unreachable.
+
+Check it with:
+
+```bash
+curl -s http://<PI>:8000/health | python3 -m json.tool   # queue_is_raw
+# or on the Pi directly:
+lpstat -l -p bw
+lpoptions -p bw -l        # empty output ⇒ raw queue
+```
+
+If it is raw, re-point the queue at the printer's IPP endpoint so CUPS applies
+its filters (and reports real job status instead of "handed to the printer"):
+
+```bash
+sudo lpadmin -p bw -v ipp://10.2.20.170/ipp/print -m everywhere -E
+lpoptions -p bw -l        # should now list real options
+```
+
+## Tests
+
+```bash
+cd server
+pip install -e '.[dev]'
+pytest tests/ -q          # 38 tests, no printer required (lp is stubbed)
+```

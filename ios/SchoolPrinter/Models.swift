@@ -5,27 +5,67 @@ enum APIError: LocalizedError {
     case http(status: Int, body: String)
     case decoding(Error)
     case network(Error)
-    case unauthorized
+    /// 401 on the login call itself — the credentials were wrong.
+    case badCredentials
+    /// 401 on any other call — the stored token is expired or revoked.
+    /// Distinct from `badCredentials` so an expired session doesn't tell the
+    /// user their password is wrong.
+    case sessionExpired
+    case rateLimited(String)
     case missingToken
 
     var errorDescription: String? {
         switch self {
-        case .invalidURL: return "Invalid server URL."
-        case .http(let s, let b): return "Server error \(s): \(b)"
+        case .invalidURL: return "Invalid server URL. Check the address in Settings."
+        case .http(let s, let b): return "Server error \(s): \(Self.detail(from: b) ?? "")"
         case .decoding(let e): return "Could not parse response: \(e.localizedDescription)"
         case .network(let e): return "Network error: \(e.localizedDescription)"
-        case .unauthorized: return "Invalid username or password."
+        case .badCredentials: return "Invalid username or password."
+        case .sessionExpired: return "Your session expired. Please sign in again."
+        case .rateLimited(let m): return m
         case .missingToken: return "Not logged in."
         }
+    }
+
+    /// FastAPI returns errors as {"detail": "..."} — surface just that.
+    static func detail(from body: String) -> String? {
+        guard let data = body.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return body.isEmpty ? nil : body }
+        return obj["detail"] as? String ?? body
     }
 }
 
 struct AppConfig {
     /// Default server URL. User can override in Settings.
+    /// The Pi's address changes between networks — see ServerSettingsView.
     static let defaultBaseURL = "http://192.168.1.106:8000"
     static let userDefaultsBaseURLKey = "server.baseURL"
-    static let userDefaultsTokenKey = "auth.token"
     static let userDefaultsUserKey = "auth.userJSON"
+    /// Keychain account name for the bearer token. The token is deliberately
+    /// NOT in UserDefaults: that is readable from unencrypted device backups,
+    /// which matters on shared or MDM-managed school iPads.
+    static let keychainTokenAccount = "auth.token"
+    static let keychainService = "com.kenny.schoolprinter"
+
+    /// Validate a user-entered server URL. Returns a normalised string, or nil.
+    /// Catches the common "192.168.1.106:8000" (no scheme) case, which
+    /// otherwise produces a URL whose *scheme* is the IP address and fails
+    /// every request with an opaque error.
+    static func normalizeBaseURL(_ raw: String) -> String? {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        if !s.lowercased().hasPrefix("http://") && !s.lowercased().hasPrefix("https://") {
+            s = "http://" + s
+        }
+        while s.hasSuffix("/") { s.removeLast() }
+        guard let comps = URLComponents(string: s),
+              let scheme = comps.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = comps.host, !host.isEmpty
+        else { return nil }
+        return s
+    }
 }
 
 struct User: Codable, Identifiable, Equatable {
@@ -80,27 +120,18 @@ struct Job: Codable, Identifiable, Equatable {
     let cups_job_id: Int?
     let status: String
     let error: String?
-    let needs_conversion: Bool
-    let spool_path: String?
+    // Defaulted so older/newer servers that omit the field still decode.
+    let needs_conversion: Bool?
     let created_at: Int
     let printed_at: Int?
 
+    // spool_path is intentionally absent: the server no longer returns it (it
+    // leaked filesystem paths) and no view ever used it.
     enum CodingKeys: String, CodingKey {
         case id, user_id, username, filename, mime_type, size_bytes
         case copies, duplex, color_mode
         case page_range, paper_size, orientation, scaling, layout_direction
-        case cups_job_id, status, error, needs_conversion, spool_path, created_at, printed_at
-    }
-
-    var statusColor: String {
-        switch status {
-        case "done": return "green"
-        case "pending", "processing": return "orange"
-        case "pending-conversion": return "blue"
-        case "error": return "red"
-        case "cancelled": return "gray"
-        default: return "primary"
-        }
+        case cups_job_id, status, error, needs_conversion, created_at, printed_at
     }
 
     var createdDate: Date { Date(timeIntervalSince1970: TimeInterval(created_at)) }

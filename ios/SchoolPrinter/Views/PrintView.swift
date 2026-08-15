@@ -7,17 +7,11 @@ struct PrintView: View {
     @State private var pickedURL: URL?
     @State private var pickedName: String = ""
     @State private var pickedMime: String = "application/octet-stream"
-    @StateObject private var previewCache: PreviewCache
+    @StateObject private var previewCache = PreviewCache()
     @State private var options = PrintOptions()
     @State private var showPicker = false
     @State private var resultMessage: String?
     @State private var resultIsError = false
-
-    init() {
-        // init previewCache with a placeholder api; replaced in body via environment
-        let placeholder = APIClient()
-        _previewCache = StateObject(wrappedValue: PreviewCache(api: placeholder))
-    }
 
     var body: some View {
         Group {
@@ -33,14 +27,16 @@ struct PrintView: View {
                 Button { showPicker = true } label: { Label("Pick", systemImage: "folder.badge.plus") }
             }
         }
+        .onAppear { previewCache.api = api }
         .sheet(isPresented: $showPicker) {
             DocPicker { url, name, mime in
                 self.pickedURL = url
                 self.pickedName = name
                 self.pickedMime = mime
                 self.resultMessage = nil
+                self.options = PrintOptions()   // don't carry settings across files
                 previewCache.api = api
-                Task { await previewCache.loadInfo(fileURL: url, filename: name, mime: mime) }
+                Task { await previewCache.loadInfo(fileURL: url) }
             }
         }
     }
@@ -50,9 +46,6 @@ struct PrintView: View {
         ScrollView {
             VStack(spacing: 20) {
                 fileCard
-                if let info = previewCache.pdfInfo, info.needs_conversion {
-                    conversionNotice
-                }
                 if pickedURL != nil {
                     HStack(alignment: .top, spacing: 20) {
                         CardView {
@@ -83,9 +76,6 @@ struct PrintView: View {
         ScrollView {
             VStack(spacing: 18) {
                 fileCard
-                if let info = previewCache.pdfInfo, info.needs_conversion {
-                    conversionNotice
-                }
                 if pickedURL != nil {
                     CardView {
                         PrintOptionsView(preview: previewCache, options: $options)
@@ -126,19 +116,6 @@ struct PrintView: View {
         }
     }
 
-    private var conversionNotice: some View {
-        CardView {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "clock.arrow.circlepath").foregroundStyle(.blue)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Office conversion coming soon").font(.subheadline.bold())
-                    Text("This document will print once the conversion iMac is connected.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }.padding()
-        }.padding(.horizontal)
-    }
-
     private var printButton: some View {
         Button {
             Task { await submit() }
@@ -167,30 +144,36 @@ struct PrintView: View {
             Image(systemName: "tray.and.arrow.up")
                 .font(.system(size: 60, weight: .ultraLight)).foregroundStyle(.tertiary)
             Text("Pick a file to print").font(.headline)
-            Text("PDF, Word, Excel, PowerPoint, images and text are supported.")
+            Text("PDF, JPEG, PNG and plain text are supported.\nExport Word, Excel or PowerPoint files to PDF first.")
                 .multilineTextAlignment(.center).foregroundStyle(.secondary).padding(.horizontal)
         }
         .padding(.top, 40)
     }
 
+    /// Printable when a file is picked and any page range the user typed is
+    /// valid for that document.
+    ///
+    /// The previous version mixed && and || across three clauses; operator
+    /// precedence made the trailing split-count test almost always true, so it
+    /// only worked by accident and was unreadable. parseCustomPages already
+    /// validates every supported form ("3", "1-5", "1,3,5-7"), so defer to it.
     private var canPrint: Bool {
-        guard pickedURL != nil else { return false }
-        if api.isLoading { return false }
-        // PDF path needs a valid page range if user picked custom
-        if let info = previewCache.pdfInfo, info.is_pdf, info.pages > 0,
-           options.pageRange.contains(where: { !$0.isWhitespace }),
-           parseCustomPages(options.pageRange, max: info.pages) == nil,
-           options.pageRange.split(separator: "-").count != 2
-               || options.pageRange.split(separator: "-").compactMap({ Int($0) }).count != 2 {
-            // allow plain "from-to" too
-            return false
-        }
-        return true
+        guard pickedURL != nil, !api.isLoading else { return false }
+        let range = options.pageRange.trimmingCharacters(in: .whitespaces)
+        guard !range.isEmpty else { return true }
+        // Only validate when we actually know the page count; for files with no
+        // known count the range is left empty by PrintOptionsView anyway.
+        guard let info = previewCache.pdfInfo, info.pages > 0 else { return true }
+        return parseCustomPages(range, max: info.pages) != nil
     }
 
     private func clearPick() {
-        pickedURL = nil; pickedName = ""; resultMessage = nil
-        previewCache.pdfInfo = nil; previewCache.thumbnails.removeAll()
+        pickedURL = nil; pickedName = ""
+        previewCache.pdfInfo = nil
+        previewCache.thumbnails.removeAll()
+        previewCache.loadedPages.removeAll()
+        previewCache.previewUnavailable = false
+        previewCache.error = nil
     }
 
     private func submit() async {
@@ -200,11 +183,7 @@ struct PrintView: View {
             let job = try await api.uploadAndPrint(
                 fileURL: url, filename: pickedName, mimeType: pickedMime, options: options
             )
-            if job.needs_conversion {
-                resultMessage = "Queued — Office conversion will complete when the iMac is online (job #\(job.id))."
-            } else {
-                resultMessage = "Sent to printer (job #\(job.id)). Status: \(job.status)."
-            }
+            resultMessage = "Sent to printer (job #\(job.id)). Status: \(job.status)."
             clearPick()
         } catch {
             resultIsError = true
@@ -238,15 +217,11 @@ struct DocPicker: UIViewControllerRepresentable {
     let onPick: (URL, String, String) -> Void
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let types: [UTType] = [
-            .pdf, .image, .plainText, .rtf,
-            UTType(filenameExtension: "doc") ?? .data,
-            UTType(filenameExtension: "docx") ?? .data,
-            UTType(filenameExtension: "xls") ?? .data,
-            UTType(filenameExtension: "xlsx") ?? .data,
-            UTType(filenameExtension: "ppt") ?? .data,
-            UTType(filenameExtension: "pptx") ?? .data,
-        ]
+        // Only formats the server can actually print. Office types are absent
+        // deliberately: the Pi cannot convert them and there is no conversion
+        // service yet, so offering them here would let a student pick a file
+        // that the server then rejects. Export to PDF instead.
+        let types: [UTType] = [.pdf, .jpeg, .png, .plainText]
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
         picker.allowsMultipleSelection = false
         picker.delegate = context.coordinator

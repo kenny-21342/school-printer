@@ -103,6 +103,9 @@ struct ServerSettingsView: View {
     @Environment(\.dismiss) var dismiss
     @State private var url: String = ""
 
+    /// nil when the text isn't a usable http(s) URL.
+    private var normalized: String? { AppConfig.normalizeBaseURL(url) }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -111,16 +114,31 @@ struct ServerSettingsView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
+                    if !url.trimmingCharacters(in: .whitespaces).isEmpty {
+                        if let n = normalized {
+                            Label(n, systemImage: "checkmark.circle.fill")
+                                .font(.caption).foregroundStyle(.green)
+                        } else {
+                            Label("Not a valid address", systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
+                    }
                 } footer: {
-                    Text("The Pi's address. On the school Wi‑Fi this will be the Pi's school IP.")
+                    Text("The Pi's address, e.g. 192.168.1.106:8000. On the school Wi‑Fi this will be the Pi's school IP. http:// is added automatically.")
                 }
 
                 Section {
                     Button("Save") {
-                        api.baseURL = url.trimmingCharacters(in: .whitespaces)
+                        // Only ever store a validated, normalised URL. Saving
+                        // raw text let "192.168.1.106:8000" through, which
+                        // produces a URL whose *scheme* is the IP address and
+                        // fails every request with an opaque error.
+                        guard let n = normalized else { return }
+                        api.baseURL = n
                         dismiss()
                     }
                     .frame(maxWidth: .infinity)
+                    .disabled(normalized == nil)
                 }
             }
             .navigationTitle("Server")
