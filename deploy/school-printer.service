@@ -1,6 +1,10 @@
 [Unit]
 Description=School Printer Relay API
-After=network-online.target snap.cups.cupsd.service
+# Order after CUPS however it happens to be packaged on this Pi. Ordering
+# dependencies on units that do not exist are ignored by systemd, so listing
+# both the Debian package unit and the snap unit is safe. See Phase 0 of the
+# audit plan: confirm which one is actually installed.
+After=network-online.target cups.service snap.cups.cupsd.service
 Wants=network-online.target
 
 [Service]
@@ -16,8 +20,16 @@ Environment=SP_SPOOL_DIR=/opt/school-printer/spool
 Environment=SP_DB_PATH=/opt/school-printer/data/printers.db
 # Set the admin bootstrap password ONLY on first boot, then remove it.
 Environment=SP_BOOTSTRAP_ADMIN_USER=admin
-EnvironmentFile=-/opt/school-printer/server/.env
-ExecStart=/opt/school-printer/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --proxy-headers
+# Config lives OUTSIDE the rsync'd server/ tree so deploys cannot clobber it.
+EnvironmentFile=-/opt/school-printer/.env
+# --proxy-headers is deliberately NOT set: there is no reverse proxy in front of
+# this service, and enabling it makes uvicorn trust X-Forwarded-For from any
+# client, which lets anyone bypass the login rate limit by spoofing the header.
+# Re-enable it (with --forwarded-allow-ips=<proxy ip>) only once TLS terminates
+# in front of the app.
+# Multiple workers are safe: the JWT secret is persisted to data/secret_key on
+# first run, so every worker signs with the same key, and SQLite runs in WAL mode.
+ExecStart=/opt/school-printer/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=10
