@@ -30,21 +30,29 @@ class Settings(BaseSettings):
     cups_queue: str = "bw"
     # Override the lp binary path (for tests). Empty = auto-discover.
     lp_binary: str = ""
-    # Max upload size in MB
-    max_upload_mb: int = 200
-    # Allowed MIME types (empty list = allow all)
+    # Max upload size in MB. Keep in sync with deploy/env.example.
+    max_upload_mb: int = 50
+    # Max scaling percentage accepted for the `scaling` print option.
+    max_scaling_percent: int = 400
+    # Allowed MIME types (empty list = allow all).
+    #
+    # Office formats are deliberately absent: the Pi cannot convert them and the
+    # iMac conversion relay does not exist yet. They are rejected up front with
+    # a clear message rather than being accepted and silently never printed.
+    # See OFFICE_MIMES in pdftools.py and the 415 branch in main.py.
     allowed_mimes: list[str] = [
         "application/pdf",
         "image/jpeg",
         "image/png",
         "text/plain",
-        "application/msword",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.ms-excel",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-powerpoint",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ]
+
+    # --- spool retention ---
+    # Delete spool files this many hours after their job reaches a terminal
+    # state. Without this the Pi's SD card fills up. 0 disables the reaper.
+    spool_retention_hours: int = 24
+    # How often the background reaper runs, in seconds.
+    spool_sweep_interval_s: int = 900
 
     # --- admin bootstrap ---
     # On first run, create this admin user if it doesn't exist

@@ -28,6 +28,16 @@ def _lp() -> str:
     return found
 
 
+def _tool(name: str) -> str:
+    """Resolve a CUPS CLI tool to an absolute path.
+
+    systemd gives the service a minimal PATH, so callers must use the resolved
+    path rather than a bare name. Falls back to the bare name (and lets the
+    subprocess call fail loudly) if the tool is not on PATH at all.
+    """
+    return shutil.which(name) or name
+
+
 @dataclass
 class PrintSettings:
     copies: int = 1
@@ -106,9 +116,15 @@ def submit_job(
             args += ["-o", f"cupsPrintScaling={SCALING_VALUES[ps.scaling]}"]
         elif ps.scaling.isdigit():
             args += ["-o", f"cupsScaling={int(ps.scaling)}"]
-    # layout direction (N-up reading order)
+    # Layout direction (N-up reading order).
+    #
+    # NOTE: this used to emit `cupsBackSide`, which is a PPD attribute
+    # describing how the *printer* renders the back of a duplex sheet — it is
+    # not a user-settable option and CUPS ignored it. The correct option is
+    # number-up-layout. It only has an effect when more than one page is being
+    # placed per sheet, and only on a queue with a real driver (not a raw queue).
     if ps.layout_direction in ("ltr", "rtl"):
-        args += ["-o", f"cupsBackSide={ps.layout_direction}"]
+        args += ["-o", f"number-up-layout={'lrtb' if ps.layout_direction == 'ltr' else 'rltb'}"]
 
     args.append(spool_path)
 
@@ -127,18 +143,55 @@ def submit_job(
 
 
 def _parse_job_id(lp_output: str) -> int | None:
+    """Extract the numeric job id from lp's "request id is bw-42 (1 file)".
+
+    Anchored on the queue name so a digit anywhere else in the (possibly
+    localized) output cannot be mistaken for the job id. Falls back to a bare
+    number only if the anchored form does not match.
+    """
     import re
-    # matches "bw-42" or any "<queue>-<digits>"
-    m = re.search(r"(\d+)", lp_output)
-    if not m:
-        return None
-    return int(m.group(1))
+    m = re.search(rf"{re.escape(settings.cups_queue)}-(\d+)", lp_output)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\b(\d+)\b", lp_output)
+    return int(m.group(1)) if m else None
+
+
+def queue_options() -> list[str]:
+    """Return the option keywords the `bw` queue advertises, via `lpoptions -l`.
+
+    An EMPTY list means the queue is raw (no PPD/driver): CUPS will pass the
+    file through untouched and silently ignore page-ranges, sides, media,
+    orientation and scaling. That is the F1 finding in the audit plan — the
+    print-options UI would be controlling nothing. Surfaced via /health so it
+    can be checked without shelling into the Pi.
+    """
+    try:
+        proc = subprocess.run(
+            [_tool("lpoptions"), "-p", settings.cups_queue, "-l"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return []
+    if proc.returncode != 0:
+        return []
+    keys = []
+    for line in proc.stdout.splitlines():
+        # lines look like "PageSize/Media Size: Letter *A4 A3"
+        if "/" in line and ":" in line:
+            keys.append(line.split("/", 1)[0].strip())
+    return keys
 
 
 def cancel_job(job_id: int) -> bool:
-    cancel = shutil.which("cancel") or "cancel"
+    """Cancel a single CUPS job.
+
+    NOTE: this must NOT pass `-a`. In CUPS `cancel -a` means "cancel every job
+    on the destination", so the previous `cancel -a bw-42` risked wiping the
+    whole queue when one student cancelled one job.
+    """
     proc = subprocess.run(
-        [cancel, "-a", f"{settings.cups_queue}-{job_id}"],
+        [_tool("cancel"), f"{settings.cups_queue}-{job_id}"],
         capture_output=True, text=True, timeout=10,
     )
     return proc.returncode == 0
@@ -146,9 +199,9 @@ def cancel_job(job_id: int) -> bool:
 
 def get_job_state(job_id: int) -> str:
     """Return current state of a CUPS job: pending|processing|done|cancelled|error|unknown."""
-    lpstat = shutil.which("lpstat") or "lpstat"
+    lpstat = _tool("lpstat")
     proc = subprocess.run(
-        ["lpstat", "-o", settings.cups_queue, "-W", "not-completed"],
+        [lpstat, "-o", settings.cups_queue, "-W", "not-completed"],
         capture_output=True, text=True, timeout=10,
     )
     if proc.returncode != 0:
@@ -160,7 +213,7 @@ def get_job_state(job_id: int) -> str:
             return "pending" if "pending" in line.lower() else "processing"
     # not in not-completed list -> check completed
     proc2 = subprocess.run(
-        ["lpstat", "-o", settings.cups_queue, "-W", "completed"],
+        [lpstat, "-o", settings.cups_queue, "-W", "completed"],
         capture_output=True, text=True, timeout=10,
     )
     for line in proc2.stdout.splitlines():

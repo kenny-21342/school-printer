@@ -38,10 +38,21 @@ class UserOut(BaseModel):
 
 
 class UserUpdate(BaseModel):
-    password: Optional[str] = None
+    password: Optional[str] = Field(None, min_length=6, max_length=256)
     display_name: Optional[str] = None
     is_admin: Optional[bool] = None
     is_active: Optional[bool] = None
+
+
+class PasswordChange(BaseModel):
+    """Self-service update via PATCH /users/me.
+
+    Changing the password requires proving knowledge of the current one, and
+    invalidates every JWT already issued to the account.
+    """
+    current_password: Optional[str] = Field(None, max_length=256)
+    new_password: Optional[str] = Field(None, min_length=6, max_length=256)
+    display_name: Optional[str] = Field(None, max_length=128)
 
 
 class JobOut(BaseModel):
@@ -63,14 +74,10 @@ class JobOut(BaseModel):
     status: str
     error: Optional[str]
     needs_conversion: bool = False
-    spool_path: Optional[str] = None
+    # spool_path is deliberately NOT exposed: it leaked server filesystem paths
+    # to every client and no client ever used it (L4).
     created_at: int
     printed_at: Optional[int]
-
-
-class JobStatusUpdate(BaseModel):
-    status: str
-    error: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -78,6 +85,10 @@ class HealthResponse(BaseModel):
     version: str
     queue: str
     cups_reachable: bool
+    # True when the CUPS queue has no PPD/driver, in which case CUPS ignores
+    # page-ranges, duplex, media, orientation and scaling entirely (F1).
+    queue_is_raw: bool = False
+    queue_options: list[str] = []
 
 
 class PdfInfoResponse(BaseModel):

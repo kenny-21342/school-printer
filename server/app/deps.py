@@ -19,9 +19,18 @@ async def current_user(
     payload = decode_token(creds.credentials)
     if payload is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid or expired token")
-    user = get_user(int(payload["sub"]))
+    try:
+        user_id = int(payload["sub"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "malformed token")
+    user = get_user(user_id)
     if user is None or not user["is_active"]:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "user inactive or unknown")
+    # Reject tokens minted before the user's last password change (H8). Tokens
+    # issued before this column existed carry no "tv" claim and default to 0,
+    # which matches the default for pre-existing rows.
+    if int(payload.get("tv", 0)) != int(user["token_version"] or 0):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "token revoked, please sign in again")
     return user
 
 
