@@ -1,0 +1,41 @@
+[Unit]
+Description=School Printer Relay API
+After=network-online.target snap.cups.cupsd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kenny_lhs
+Group=kenny_lhs
+WorkingDirectory=/opt/school-printer/server
+Environment=PYTHONUNBUFFERED=1
+Environment=SP_HOST=0.0.0.0
+Environment=SP_PORT=8000
+Environment=SP_DATA_DIR=/opt/school-printer/data
+Environment=SP_SPOOL_DIR=/opt/school-printer/spool
+Environment=SP_DB_PATH=/opt/school-printer/data/printers.db
+# Set the admin bootstrap password ONLY on first boot, then remove it.
+Environment=SP_BOOTSTRAP_ADMIN_USER=admin
+EnvironmentFile=-/opt/school-printer/server/.env
+ExecStart=/opt/school-printer/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --proxy-headers
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/school-printer
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

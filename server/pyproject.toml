@@ -1,0 +1,30 @@
+[project]
+name = "school-printer"
+version = "0.1.0"
+description = "Print relay API: iOS upload -> CUPS -> school FUJIFILM Xerox (bw)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "python-multipart>=0.0.12",
+    "passlib>=1.7.4",
+    "argon2-cffi>=23.1",
+    "python-jose[cryptography]>=3.3",
+    "slowapi>=0.1.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "httpx>=0.27", "pytest-asyncio>=0.24"]
+
+[tool.uvicorn]
+host = "0.0.0.0"
+port = 8000
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]

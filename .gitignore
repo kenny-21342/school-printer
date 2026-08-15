@@ -1,0 +1,28 @@
+# Secrets / config
+.env
+*.env
+!deploy/env.example
+secret_key
+
+# Data
+*.db
+*.db-wal
+*.db-shm
+spool/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# macOS
+.DS_Store
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
