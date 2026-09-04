@@ -595,10 +595,17 @@ def create_app() -> FastAPI:
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
         import socket
-        # Try both the Debian package socket and the snap socket — which one
-        # exists depends on how CUPS was installed on this Pi.
+        # Which socket exists depends on the host: the Debian package and the
+        # snap put it in different places on the Pi, and macOS -- where CUPS is
+        # part of the OS -- uses /var/run/cupsd. Checking only the two Linux
+        # paths made /health report cups_reachable=false on a Mac that was
+        # printing perfectly well, which is worse than not checking at all.
         reachable = False
-        for sock_path in ("/run/cups/cups.sock", "/var/snap/cups/common/run/cups.sock"):
+        for sock_path in (
+            "/run/cups/cups.sock",
+            "/var/snap/cups/common/run/cups.sock",
+            "/var/run/cupsd",
+        ):
             try:
                 s = socket.socket(socket.AF_UNIX); s.settimeout(1)
                 s.connect(sock_path); s.close()

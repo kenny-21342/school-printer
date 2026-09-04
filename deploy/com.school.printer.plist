@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  School Printer Relay API, as a macOS LaunchAgent.
+
+  A LaunchAgent, not a LaunchDaemon, and that is the whole reason this file
+  looks the way it does. Office -> PDF conversion drives Word, Excel and
+  PowerPoint through AppleScript, and those are GUI applications: they need a
+  logged-in window session to launch into. A LaunchDaemon runs before login in
+  a session with no GUI access, so conversion would fail on every Office file
+  while PDFs printed fine -- the most confusing possible failure.
+
+  Consequences of that choice, and they matter:
+
+    - The service only runs while the account is logged in. Set the iMac to log
+      in automatically (System Settings -> Users & Groups -> Automatic login),
+      or the print queue is down after every restart.
+    - The Mac must not sleep. System Settings -> Displays -> Advanced -> "Prevent
+      automatic sleeping on power adapter when the display is off", or run the
+      service under `caffeinate -s`.
+    - Port 8000 binds fine without root. Do not add a privileged port here; the
+      firewall prompt on first bind is expected, and must be allowed.
+
+  Install:
+    cp deploy/com.school.printer.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.school.printer.plist
+    launchctl kickstart -k gui/$(id -u)/com.school.printer
+
+  Status and logs:
+    launchctl print gui/$(id -u)/com.school.printer
+    tail -f /usr/local/school-printer/logs/stderr.log
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.school.printer</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/school-printer/venv/bin/uvicorn</string>
+        <string>app.main:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8000</string>
+        <!-- Safe: the JWT secret is persisted to data/secret_key on first run,
+             so every worker signs with the same key, and SQLite is in WAL mode.
+             --proxy-headers is deliberately absent, exactly as in the systemd
+             unit: with no reverse proxy in front, it would let any client spoof
+             X-Forwarded-For and walk past the login rate limit. -->
+        <string>--workers</string>
+        <string>4</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/usr/local/school-printer/server</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <key>SP_HOST</key>
+        <string>0.0.0.0</string>
+        <key>SP_PORT</key>
+        <string>8000</string>
+        <key>SP_DATA_DIR</key>
+        <string>/usr/local/school-printer/data</string>
+        <key>SP_SPOOL_DIR</key>
+        <string>/usr/local/school-printer/spool</string>
+        <key>SP_DB_PATH</key>
+        <string>/usr/local/school-printer/data/printers.db</string>
+        <!-- launchd gives a minimal PATH, like systemd. cups.py resolves lp and
+             lpstat to absolute paths itself, but pdftoppm and pdfinfo come from
+             Homebrew and are found on PATH, so both prefixes are listed. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>3</integer>
+
+    <key>StandardOutPath</key>
+    <string>/usr/local/school-printer/logs/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/school-printer/logs/stderr.log</string>
+</dict>
+</plist>

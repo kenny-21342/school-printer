@@ -162,6 +162,36 @@ sudo lpadmin -p bw -v ipp://10.2.20.170/ipp/print -m everywhere -E
 lpoptions -p bw -l        # should now list real options
 ```
 
+## Running it on a Mac instead of the Pi
+
+The Pi was one of two machines: it ran the API and CUPS, and shipped Office
+files over the network to an iMac that had Word installed, then polled for the
+PDF to come back (`imac/README.md`). Running the API on the Mac itself deletes
+that relay entirely -- conversion becomes a local subprocess call -- and frees
+the Pi for something else.
+
+Nothing in the server had to change to make this work, because macOS ships CUPS
+as part of the OS (`/usr/bin/lp`, `lpstat`, `lpoptions`, `cancel`) and the
+server is plain FastAPI, SQLite and subprocess calls. `pdftoppm` and `pdfinfo`
+come from `brew install poppler`.
+
+```bash
+brew install poppler
+lpadmin -p bw -v ipp://10.2.20.170/ipp/print -m everywhere -E
+./deploy/deploy-macos.sh
+```
+
+Two requirements the Pi did not have, both consequences of the same fact -- the
+service runs as a **LaunchAgent**, because AppleScript can only drive Word,
+Excel and PowerPoint inside a logged-in GUI session:
+
+- **Automatic login** must be on, or the queue is down after every restart.
+- **The Mac must not sleep**: Displays -> Advanced -> "Prevent automatic
+  sleeping on power adapter when the display is off".
+
+A LaunchDaemon would start without login but has no GUI session, so PDFs would
+print and every Office file would fail -- the most confusing possible split.
+
 ## Tests
 
 ```bash
