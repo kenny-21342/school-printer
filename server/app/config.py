@@ -5,6 +5,8 @@ import secrets
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .pdftools import CONVERTIBLE_MIMES
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="SP_", extra="ignore")
@@ -15,10 +17,11 @@ class Settings(BaseSettings):
     log_level: str = "info"
 
     # --- paths ---
-    base_dir: Path = Path("/opt/school-printer")
-    data_dir: Path = Path("/opt/school-printer/data")
-    spool_dir: Path = Path("/opt/school-printer/spool")
-    db_path: Path = Path("/opt/school-printer/data/printers.db")
+    # The iMac is the only host now; these match deploy/com.school.printer.plist.
+    base_dir: Path = Path("/usr/local/school-printer")
+    data_dir: Path = Path("/usr/local/school-printer/data")
+    spool_dir: Path = Path("/usr/local/school-printer/spool")
+    db_path: Path = Path("/usr/local/school-printer/data/printers.db")
 
     # --- auth ---
     # Auto-generated on first run if unset; persisted to data_dir/secret_key
@@ -36,20 +39,38 @@ class Settings(BaseSettings):
     max_scaling_percent: int = 400
     # Allowed MIME types (empty list = allow all).
     #
-    # Office formats are deliberately absent: the Pi cannot convert them and the
-    # iMac conversion relay does not exist yet. They are rejected up front with
-    # a clear message rather than being accepted and silently never printed.
-    # See OFFICE_MIMES in pdftools.py and the 415 branch in main.py.
+    # Word, Excel and PowerPoint are in the list because the API now runs on the
+    # iMac that has Office installed: they are accepted, converted to PDF
+    # locally (office.py) and then printed. Formats that cannot be converted --
+    # Pages, Numbers, Keynote -- stay out, and main.py rejects them with a
+    # message telling the student to export a PDF.
     allowed_mimes: list[str] = [
         "application/pdf",
         "image/jpeg",
         "image/png",
         "text/plain",
+        *sorted(CONVERTIBLE_MIMES),
     ]
+
+    # --- Office -> PDF conversion ---
+    # Turn off to refuse Office uploads up front (e.g. while Office is being
+    # reinstalled) instead of accepting jobs that will fail one by one.
+    office_conversion_enabled: bool = True
+    # Override the osascript binary (for tests). Empty = auto-discover.
+    office_convert_binary: str = ""
+    # Per-document ceiling. Word can take tens of seconds on a large document;
+    # anything past this is a hung GUI app and the job is failed.
+    office_convert_timeout_s: int = 180
+    # How often the conversion worker looks for new work.
+    conversion_poll_interval_s: int = 5
+    # A claim older than this is treated as abandoned (the process crashed
+    # mid-conversion) and the job is picked up again.
+    conversion_claim_stale_s: int = 600
 
     # --- spool retention ---
     # Delete spool files this many hours after their job reaches a terminal
-    # state. Without this the Pi's SD card fills up. 0 disables the reaper.
+    # state. Without this the spool directory grows without bound. 0 disables
+    # the reaper.
     spool_retention_hours: int = 24
     # How often the background reaper runs, in seconds.
     spool_sweep_interval_s: int = 900

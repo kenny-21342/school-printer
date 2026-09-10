@@ -1,24 +1,29 @@
 # School Printer Relay
 
-iPhone/iPad → Raspberry Pi → FUJIFILM Xerox "bw" (`lpd://10.2.20.170/sjbw`)
+iPhone/iPad → iMac → FUJIFILM Xerox "bw" (`ipp://10.2.20.170/ipp/print`)
 
 ## Architecture
 
 ```
-┌─────────────┐    HTTPS/multipart    ┌──────────────────────┐    LPD     ┌────────────────┐
-│  iOS app    │ ────────────────────> │ Pi 4: FastAPI + JWT  │ ────────> │ FUJIFILM Xerox │
-│ SchoolPrinter│   (Bearer token)     │   + SQLite + CUPS bw  │  lpd://   │  (10.2.20.170) │
-└─────────────┘                       └──────────────────────┘           └────────────────┘
+┌──────────────┐   HTTPS/multipart   ┌────────────────────────────────┐   IPP    ┌────────────────┐
+│   iOS app    │ ──────────────────> │ iMac: FastAPI + JWT + SQLite   │ ───────> │ FUJIFILM Xerox │
+│ SchoolPrinter│    (Bearer token)   │  + CUPS + Microsoft Office     │          │  (10.2.20.170) │
+└──────────────┘                     └────────────────────────────────┘          └────────────────┘
 ```
 
-- iOS picks a file (PDF, JPEG, PNG, text) → uploads to Pi
-- Pi authenticates the user (per-user JWT, SQLite), spools file, calls `lp -d bw`
-- CUPS sends the PDF over LPD to the printer
+One machine does everything:
 
-> **Office files are not supported yet.** Word/Excel/PowerPoint uploads are
-> rejected with a clear message asking the user to export to PDF. The iMac
-> conversion service in `imac/` is a design sketch that was never wired up —
-> previously these files were accepted, queued forever, and never printed.
+- iOS picks a file (PDF, JPEG, PNG, text, Word, Excel, PowerPoint) → uploads
+- the iMac authenticates the user (per-user JWT, SQLite) and spools the file
+- Office files are converted to PDF locally, by driving real Word/Excel/
+  PowerPoint through AppleScript (`server/app/office.py`)
+- `lp -d bw` hands the PDF to CUPS, which sends it to the printer over IPP
+
+This used to be split across a Raspberry Pi and the iMac, with the Pi shipping
+Office files over SMB to a folder-watching converter and polling for the PDF to
+come back. **The Pi is retired.** Collapsing both halves onto the iMac turned
+that whole relay into one subprocess call — which is what finally made Office
+printing work at all.
 
 ## Project layout
 
@@ -26,7 +31,9 @@ iPhone/iPad → Raspberry Pi → FUJIFILM Xerox "bw" (`lpd://10.2.20.170/sjbw`)
 school-printer/
 ├── server/                 # FastAPI print relay
 │   ├── app/
-│   │   ├── main.py         # all endpoints
+│   │   ├── main.py         # endpoints + the conversion worker
+│   │   ├── office.py       # Office → PDF via AppleScript
+│   │   ├── scripts/convert-to-pdf.applescript
 │   │   ├── auth.py         # argon2 hashing + JWT
 │   │   ├── cups.py         # lp wrapper
 │   │   ├── db.py           # SQLite schema
@@ -35,8 +42,8 @@ school-printer/
 │   │   └── config.py       # settings (.env-driven)
 │   └── pyproject.toml
 ├── deploy/
-│   ├── deploy.sh           # idempotent Pi deploy (rsync + venv + systemd)
-│   ├── school-printer.service
+│   ├── deploy-macos.sh          # idempotent install/update (rsync + venv + LaunchAgent)
+│   ├── com.school.printer.plist # the LaunchAgent
 │   └── env.example
 └── ios/
     ├── SchoolPrinter/      # Swift sources
@@ -44,16 +51,30 @@ school-printer/
     └── SchoolPrinter.xcodeproj
 ```
 
-## Deployed (Pi at 192.168.1.106)
+## Setting up the iMac
 
-| Component  | Status                          |
-|------------|---------------------------------|
-| systemd    | `school-printer.service` (active, enabled) |
-| Listening  | `0.0.0.0:8000`                  |
-| UFW        | 8000/tcp allowed                |
-| CUPS queue | `bw` → `lpd://10.2.20.170/sjbw` (raw, mono) |
-| Disk       | 3.4 GB free (was 215 MB)        |
-| Admin user | `admin` (password: change via API) |
+```bash
+brew install poppler                                   # pdftoppm, pdfinfo (previews)
+lpadmin -p bw -v ipp://10.2.20.170/ipp/print -m everywhere -E
+./deploy/deploy-macos.sh                               # run ON the iMac
+```
+
+Then three settings that are not optional, all consequences of one fact — the
+service runs as a **LaunchAgent**, because AppleScript can only drive Word,
+Excel and PowerPoint inside a logged-in GUI session:
+
+1. **Automatic login** on (System Settings → Users & Groups), or the print queue
+   is down after every restart.
+2. **No sleep**: Displays → Advanced → "Prevent automatic sleeping on power
+   adapter when the display is off".
+3. **Automation permission**, once per Office app: the first Word job pops a
+   "school-printer wants to control Microsoft Word" dialog and fails until
+   someone clicks OK. Print one of each while sitting at the machine, or
+   pre-approve under Privacy & Security → Automation.
+
+A LaunchDaemon would start without login but has no GUI session, so PDFs would
+print and every Office file would fail — the most confusing possible split.
+`GET /health` reports `office.gui_session` precisely so that state is visible.
 
 ## API
 
@@ -66,28 +87,48 @@ school-printer/
 | PATCH  | `/users/{id}`                | admin  | Update user (password, etc)       |
 | DELETE | `/users/{id}`                | admin  | Delete user                       |
 | POST   | `/print`                     | user   | Upload + print (multipart)        |
+| POST   | `/pdf-info`                  | user   | Page count / size, no printing    |
+| GET    | `/preview`                   | user   | Render one page as a thumbnail    |
 | GET    | `/jobs`                      | user   | List jobs (`?include_all=true` admin) |
 | GET    | `/jobs/{id}`                 | user   | Job detail                        |
 | POST   | `/jobs/{id}/refresh`         | user   | Sync status from CUPS             |
 | DELETE | `/jobs/{id}`                 | user   | Cancel job                        |
-| GET    | `/health`                    | -      | Health check                      |
+| GET    | `/health`                    | -      | Health check (queue + Office)     |
 | GET    | `/docs`                      | -      | Swagger UI                        |
+
+### Job statuses
+
+`converting` → `pending` → `processing` → `done`, or `error` / `cancelled`.
+
+Only Office uploads start at `converting`: `/print` returns as soon as the file
+is on disk, and a background worker converts it and hands the PDF to CUPS.
+Conversion takes seconds to a minute, far too long to hold an upload request
+open on school Wi-Fi. A job in `converting` has no `cups_job_id` yet, and
+cancelling one stops it before it ever reaches the printer.
+
+Conversions are serialised across all four uvicorn workers with a file lock —
+AppleScript drives a single shared instance of Word, and two at once lose a
+document. A worker that dies mid-conversion releases its claim after
+`SP_CONVERSION_CLAIM_STALE_S` and the job is retried.
 
 ## Operations
 
 ```bash
-# redeploy after code changes
-./deploy/deploy.sh
+# redeploy after code changes (on the iMac)
+./deploy/deploy-macos.sh
 
 # status / logs
-ssh kenny_lhs@192.168.1.106 'sudo systemctl status school-printer'
-ssh kenny_lhs@192.168.1.106 'sudo journalctl -u school-printer -f'
+launchctl print gui/$(id -u)/com.school.printer
+tail -f /usr/local/school-printer/logs/stderr.log
+
+# health, including whether Office printing will work
+curl -s localhost:8000/health | python3 -m json.tool
 
 # CUPS web UI
-open http://192.168.1.106:631/
+open http://localhost:631/
 
 # create a student user
-curl -X POST http://192.168.1.106:8000/users \
+curl -X POST http://localhost:8000/users \
   -H "Authorization: Bearer <admin_jwt>" \
   -H "Content-Type: application/json" \
   -d '{"username":"alice","password":"secret123","display_name":"Alice"}'
@@ -96,22 +137,24 @@ curl -X POST http://192.168.1.106:8000/users \
 ## iOS
 
 Open `ios/SchoolPrinter.xcodeproj` in Xcode (16+). Run on a simulator or device.
-Default server is `http://192.168.1.106:8000`; users can override in Settings.
+Default server is `http://imac.local:8000` — a Bonjour name, so it keeps working
+when the iMac's IP changes between networks. Users can override it in Settings
+(use the IP if `.local` does not resolve on the school Wi-Fi).
 
 > Note: iOS 14+ blocks plain HTTP by default. `Info.plist` already allows local
-> network access; for HTTPS at school, put the Pi behind a reverse proxy (nginx
-> + Let's Encrypt or a self-signed cert installed via MDM/profile).
+> network access; for HTTPS at school, put the iMac behind a reverse proxy
+> (nginx + Let's Encrypt or a self-signed cert installed via MDM/profile).
 
-## When you deploy the Pi at school
+## When you move the iMac to school
 
-1. Plug Pi into school network (Wi-Fi or Ethernet).
-2. Find its new IP: `ip addr` on the Pi, or check the router/DHCP.
-3. Update CUPS queue if the printer IP changed:
+1. Put it on the school network (Wi-Fi or Ethernet).
+2. Update the CUPS queue if the printer IP changed:
    ```bash
-   sudo lpadmin -p bw -v lpd://NEW_PRINTER_IP/sjbw
+   sudo lpadmin -p bw -v ipp://NEW_PRINTER_IP/ipp/print -m everywhere -E
    ```
-4. Update the iOS app's server URL in Settings.
-5. The service auto-starts on boot; nothing else to do.
+3. Confirm `imac.local` resolves from an iPad; if not, set the server URL in the
+   app's Settings to the iMac's school IP (and ask for a DHCP reservation).
+4. Check `/health`: `cups_reachable`, `queue_is_raw: false`, `office.available`.
 
 ## Security notes
 
@@ -120,37 +163,34 @@ Default server is `http://192.168.1.106:8000`; users can override in Settings.
 - Passwords hashed with argon2.
 - Login throttling is **per username** (10 failures → 5-minute lockout), not per
   IP: behind school NAT the whole school shares one address.
-- UFW only allows 22, 3389, Samba, 8000 from LAN.
-- systemd service runs with `ProtectSystem=full`, `MemoryMax=1G`, no new privs.
+- The macOS firewall prompt on first bind to port 8000 must be allowed.
 - File uploads limited to 50 MB, MIME-type allowlist.
 - Spool files are deleted once a job finishes, and swept hourly
-  (`SP_SPOOL_RETENTION_HOURS`).
-- `deploy.sh` takes the sudo password from the `SUDO_PW` environment variable —
-  never hardcode it. If you previously used the committed default, rotate it.
+  (`SP_SPOOL_RETENTION_HOURS`). A converted job keeps only the PDF.
+- Office conversion opens uploaded documents in real Word/Excel/PowerPoint. Macro
+  execution is off by default in Office, and files arrive from authenticated
+  users only, but this is the one place where student input reaches a GUI app —
+  worth keeping in mind before opening the service to a wider network.
 
 ## Known limitations
 
-- The Pi can't reach the printer from home (different subnet). Printer will be
-  testable once the Pi is at school.
 - Plain HTTP only. Add TLS before relying on this for real student data.
 - **iOS only.** Windows, Android and Chromebook users are not served, despite
   that being the original goal. There is also no app-distribution story: an
   unsigned build expires after 7 days and needs a Mac + Xcode per device.
-- Office formats need an export to PDF first (see above).
+- Pages, Numbers and Keynote are rejected (415) with a message asking for a PDF
+  export — nothing scripts them, and the export is two clicks in the app.
+- The printer is only reachable from the school subnet, so end-to-end printing
+  is testable only once the iMac is at school.
 
 ## Open item: is the `bw` queue raw?
 
 If `bw` was created without a PPD/driver, CUPS passes files through untouched
 and **silently ignores** page ranges, duplex, paper size, orientation and
-scaling — meaning the whole print-options UI would control nothing. This has
-not been verified because the Pi has been unreachable.
-
-Check it with:
+scaling — meaning the whole print-options UI would control nothing.
 
 ```bash
-curl -s http://<PI>:8000/health | python3 -m json.tool   # queue_is_raw
-# or on the Pi directly:
-lpstat -l -p bw
+curl -s http://localhost:8000/health | python3 -m json.tool   # queue_is_raw
 lpoptions -p bw -l        # empty output ⇒ raw queue
 ```
 
@@ -162,40 +202,13 @@ sudo lpadmin -p bw -v ipp://10.2.20.170/ipp/print -m everywhere -E
 lpoptions -p bw -l        # should now list real options
 ```
 
-## Running it on a Mac instead of the Pi
-
-The Pi was one of two machines: it ran the API and CUPS, and shipped Office
-files over the network to an iMac that had Word installed, then polled for the
-PDF to come back (`imac/README.md`). Running the API on the Mac itself deletes
-that relay entirely -- conversion becomes a local subprocess call -- and frees
-the Pi for something else.
-
-Nothing in the server had to change to make this work, because macOS ships CUPS
-as part of the OS (`/usr/bin/lp`, `lpstat`, `lpoptions`, `cancel`) and the
-server is plain FastAPI, SQLite and subprocess calls. `pdftoppm` and `pdfinfo`
-come from `brew install poppler`.
-
-```bash
-brew install poppler
-lpadmin -p bw -v ipp://10.2.20.170/ipp/print -m everywhere -E
-./deploy/deploy-macos.sh
-```
-
-Two requirements the Pi did not have, both consequences of the same fact -- the
-service runs as a **LaunchAgent**, because AppleScript can only drive Word,
-Excel and PowerPoint inside a logged-in GUI session:
-
-- **Automatic login** must be on, or the queue is down after every restart.
-- **The Mac must not sleep**: Displays -> Advanced -> "Prevent automatic
-  sleeping on power adapter when the display is off".
-
-A LaunchDaemon would start without login but has no GUI session, so PDFs would
-print and every Office file would fail -- the most confusing possible split.
-
 ## Tests
 
 ```bash
 cd server
 pip install -e '.[dev]'
-pytest tests/ -q          # 38 tests, no printer required (lp is stubbed)
+pytest tests/ -q          # 46 tests; no printer and no Office required
 ```
+
+`lp` and `osascript` are both stubbed, so the suite never touches the printer
+and never launches Word.

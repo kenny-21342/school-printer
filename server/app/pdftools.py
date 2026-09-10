@@ -114,6 +114,7 @@ def _jpeg_dims(data: bytes) -> tuple[int, int]:
 
 # ---- MIME type / Office detection ----
 
+# Everything that is not directly printable and has to become a PDF first.
 OFFICE_MIMES = {
     "application/msword",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -127,8 +128,28 @@ OFFICE_MIMES = {
 }
 
 
+# The subset the converter can actually handle: Microsoft Office, driven through
+# AppleScript on the iMac (see office.py). The iWork formats above are detected
+# so the upload can be refused with a useful message -- Pages, Numbers and
+# Keynote are not scripted here, and a student can export a PDF from the app
+# itself in two clicks.
+CONVERTIBLE_MIMES = {
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+
+
 def needs_conversion(mime: str) -> bool:
     return mime in OFFICE_MIMES
+
+
+def can_convert(mime: str) -> bool:
+    """True when office.convert_to_pdf() knows how to handle this type."""
+    return mime in CONVERTIBLE_MIMES
 
 
 def office_extension_for_mime(mime: str) -> str:

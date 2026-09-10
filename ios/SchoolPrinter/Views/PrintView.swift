@@ -144,7 +144,7 @@ struct PrintView: View {
             Image(systemName: "tray.and.arrow.up")
                 .font(.system(size: 60, weight: .ultraLight)).foregroundStyle(.tertiary)
             Text("Pick a file to print").font(.headline)
-            Text("PDF, JPEG, PNG and plain text are supported.\nExport Word, Excel or PowerPoint files to PDF first.")
+            Text("PDF, JPEG, PNG, plain text, Word, Excel and PowerPoint.\nOffice files are converted to PDF on the print server.")
                 .multilineTextAlignment(.center).foregroundStyle(.secondary).padding(.horizontal)
         }
         .padding(.top, 40)
@@ -183,7 +183,12 @@ struct PrintView: View {
             let job = try await api.uploadAndPrint(
                 fileURL: url, filename: pickedName, mimeType: pickedMime, options: options
             )
-            resultMessage = "Sent to printer (job #\(job.id)). Status: \(job.status)."
+            // An Office file has not reached the printer yet — saying "sent to
+            // printer" for a job that is still being converted is how a student
+            // ends up standing at the tray waiting for nothing.
+            resultMessage = job.status == "converting"
+                ? "Uploaded (job #\(job.id)). Converting to PDF — it will print in a few seconds; watch My Jobs."
+                : "Sent to printer (job #\(job.id)). Status: \(job.status)."
             clearPick()
         } catch {
             resultIsError = true
@@ -206,6 +211,15 @@ struct PrintView: View {
         case "image/jpeg": return "JPEG image"
         case "image/png": return "PNG image"
         case "text/plain": return "Plain text"
+        case "application/msword",
+             "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            return "Word document — converted to PDF on the server"
+        case "application/vnd.ms-excel",
+             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+            return "Excel workbook — converted to PDF on the server"
+        case "application/vnd.ms-powerpoint",
+             "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+            return "PowerPoint deck — converted to PDF on the server"
         default: return mime
         }
     }
@@ -217,11 +231,15 @@ struct DocPicker: UIViewControllerRepresentable {
     let onPick: (URL, String, String) -> Void
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        // Only formats the server can actually print. Office types are absent
-        // deliberately: the Pi cannot convert them and there is no conversion
-        // service yet, so offering them here would let a student pick a file
-        // that the server then rejects. Export to PDF instead.
-        let types: [UTType] = [.pdf, .jpeg, .png, .plainText]
+        // Only formats the server can actually print. Word, Excel and
+        // PowerPoint are here because the server converts them to PDF itself
+        // now that it runs on the iMac that has Office installed. Pages,
+        // Numbers and Keynote stay out: nothing converts those, and offering
+        // them would let a student pick a file the server then rejects.
+        let officeTypes: [UTType] = [
+            "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+        ].compactMap { UTType(filenameExtension: $0) }
+        let types: [UTType] = [.pdf, .jpeg, .png, .plainText] + officeTypes
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
         picker.allowsMultipleSelection = false
         picker.delegate = context.coordinator

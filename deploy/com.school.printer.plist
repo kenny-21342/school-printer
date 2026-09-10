@@ -44,9 +44,9 @@
         <string>8000</string>
         <!-- Safe: the JWT secret is persisted to data/secret_key on first run,
              so every worker signs with the same key, and SQLite is in WAL mode.
-             --proxy-headers is deliberately absent, exactly as in the systemd
-             unit: with no reverse proxy in front, it would let any client spoof
-             X-Forwarded-For and walk past the login rate limit. -->
+             --proxy-headers is deliberately absent: with no reverse proxy in
+             front, it would let any client spoof X-Forwarded-For and walk past
+             the login rate limit. -->
         <string>--workers</string>
         <string>4</string>
     </array>
@@ -68,9 +68,9 @@
         <string>/usr/local/school-printer/spool</string>
         <key>SP_DB_PATH</key>
         <string>/usr/local/school-printer/data/printers.db</string>
-        <!-- launchd gives a minimal PATH, like systemd. cups.py resolves lp and
-             lpstat to absolute paths itself, but pdftoppm and pdfinfo come from
-             Homebrew and are found on PATH, so both prefixes are listed. -->
+        <!-- launchd gives a minimal PATH. cups.py resolves lp and lpstat to
+             absolute paths itself, but pdftoppm and pdfinfo come from Homebrew
+             and are found on PATH, so both prefixes are listed. -->
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>

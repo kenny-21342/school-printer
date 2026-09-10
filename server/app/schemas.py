@@ -71,6 +71,9 @@ class JobOut(BaseModel):
     scaling: Optional[str] = None
     layout_direction: Optional[str] = None
     cups_job_id: Optional[int]
+    # queued | converting | pending | processing | done | cancelled | error.
+    # 'converting' means an Office file is being turned into a PDF and has not
+    # reached CUPS yet, so cups_job_id is still null.
     status: str
     error: Optional[str]
     needs_conversion: bool = False
@@ -78,6 +81,20 @@ class JobOut(BaseModel):
     # to every client and no client ever used it (L4).
     created_at: int
     printed_at: Optional[int]
+
+
+class OfficeStatus(BaseModel):
+    """Whether Word/Excel/PowerPoint printing will work on this host.
+
+    `gui_session` is the one that catches the confusing failure: without
+    automatic login the service comes back after a reboot in a session with no
+    GUI, PDFs keep printing, and only Office files fail.
+    """
+    enabled: bool
+    available: bool
+    gui_session: bool
+    script_present: bool
+    apps: dict[str, bool] = {}
 
 
 class HealthResponse(BaseModel):
@@ -89,6 +106,7 @@ class HealthResponse(BaseModel):
     # page-ranges, duplex, media, orientation and scaling entirely (F1).
     queue_is_raw: bool = False
     queue_options: list[str] = []
+    office: Optional[OfficeStatus] = None
 
 
 class PdfInfoResponse(BaseModel):

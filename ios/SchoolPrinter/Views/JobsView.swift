@@ -48,7 +48,20 @@ struct JobsView: View {
             }
         }
         .refreshable { await load() }
-        .task { await load() }
+        .task {
+            await load()
+            await pollWhileConverting()
+        }
+    }
+
+    /// Same reasoning as JobDetailView: an Office job flips from "Converting…"
+    /// to "Pending" on the server's schedule, not the user's.
+    private func pollWhileConverting() async {
+        while !Task.isCancelled && jobs.contains(where: { $0.status == "converting" }) {
+            try? await Task.sleep(for: .seconds(3))
+            if Task.isCancelled { return }
+            await load()
+        }
     }
 
     @MainActor
@@ -103,6 +116,9 @@ struct StatusBadge: View {
         let (color, label): (Color, String)
         switch status {
         case "done": (color, label) = (.green, "Done")
+        // Office file being turned into a PDF on the server; it has not reached
+        // the printer yet, which is why it has no CUPS job id.
+        case "converting": (color, label) = (.orange, "Converting…")
         case "pending": (color, label) = (.orange, "Pending")
         case "processing": (color, label) = (.blue, "Printing")
         case "error": (color, label) = (.red, "Failed")
@@ -131,6 +147,10 @@ struct JobDetailView: View {
                 List {
                     Section("Status") {
                         HStack { Text("State"); Spacer(); StatusBadge(status: job.status) }
+                        if job.status == "converting" {
+                            Text("Word, Excel and PowerPoint files are converted to PDF on the print server. This usually takes a few seconds, and up to a minute for a long document.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
                         if let e = job.error {
                             Text(e).foregroundStyle(.red).font(.footnote)
                         }
@@ -152,7 +172,7 @@ struct JobDetailView: View {
                     Section("CUPS") {
                         LabeledContent("Job ID", value: job.cups_job_id.map(String.init) ?? "—")
                     }
-                    if ["pending", "processing"].contains(job.status) {
+                    if ["converting", "pending", "processing"].contains(job.status) {
                         Section {
                             Button("Cancel this job", role: .destructive) {
                                 showCancelAlert = true
@@ -173,7 +193,10 @@ struct JobDetailView: View {
                 } label: { Image(systemName: "arrow.clockwise") }
             }
         }
-        .task { await refresh() }
+        .task {
+            await refresh()
+            await pollWhileConverting()
+        }
         .alert("Cancel this print job?", isPresented: $showCancelAlert) {
             Button("Cancel job", role: .destructive) {
                 Task {
@@ -190,6 +213,19 @@ struct JobDetailView: View {
             job = try await api.refreshJob(jobId)
         } catch {
             err = error.localizedDescription
+        }
+    }
+
+    /// Conversion finishes on its own, seconds to a minute after the upload,
+    /// with nothing to push the news to the phone — so poll until the job
+    /// leaves "converting". Every other status changes only when the printer
+    /// does, and pull-to-refresh covers those. SwiftUI cancels this with the
+    /// view.
+    private func pollWhileConverting() async {
+        while !Task.isCancelled && job?.status == "converting" {
+            try? await Task.sleep(for: .seconds(3))
+            if Task.isCancelled { return }
+            await refresh()
         }
     }
 }

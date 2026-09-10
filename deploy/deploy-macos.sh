@@ -1,25 +1,28 @@
 #!/usr/bin/env bash
-# Install or update the school-printer API on a Mac.
+# Install or update the school-printer relay on the iMac. This is the only
+# deploy script: the iMac is the only machine in the pipeline.
 #
-# The Pi was one of two machines: it ran the API and CUPS, and shipped Office
-# files over the network to an iMac that had Word installed, then polled for the
-# PDF to come back. Running the API on the Mac itself deletes that whole relay
-# -- the conversion becomes a local subprocess call -- and frees the Pi.
+# It used to be two. The Pi ran the API and CUPS and shipped Office files over
+# the network to the iMac, which had Word installed, then polled a shared folder
+# for the PDF to come back. Running everything on the iMac deletes that relay --
+# conversion is now a local subprocess call (server/app/office.py) -- and frees
+# the Pi entirely.
 #
-# What made this possible without a rewrite: macOS ships CUPS as part of the OS
-# (/usr/bin/lp, lpstat, lpoptions, cancel are all present), and the server is
+# What made the move possible without a rewrite: macOS ships CUPS as part of the
+# OS (/usr/bin/lp, lpstat, lpoptions, cancel are all present), and the server is
 # plain FastAPI, SQLite and subprocess calls with nothing Linux-specific in it.
 #
-# Usage, run ON the Mac:
+# Usage, run ON the iMac:
 #   ./deploy/deploy-macos.sh
 #
 # Prerequisites, checked below and not installed for you:
 #   brew install poppler          # pdftoppm and pdfinfo, for previews
+#   Microsoft Word/Excel/PowerPoint, signed in once so they are licensed
 #   a CUPS queue named "bw"       # lpadmin -p bw -v ipp://<printer>/ipp/print -m everywhere -E
 #
 # Idempotent: safe to re-run for updates. The live config at
 # /usr/local/school-printer/.env sits outside the copied tree, so an update can
-# never clobber it -- same rule as the Pi deploy.
+# never clobber it.
 
 set -euo pipefail
 
@@ -33,7 +36,7 @@ say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 say "Checking prerequisites"
 
 if [ "$(uname -s)" != "Darwin" ]; then
-  echo "This script is for macOS. Use deploy/deploy.sh for the Pi." >&2
+  echo "This script is for macOS; the relay runs on the iMac." >&2
   exit 1
 fi
 
@@ -47,6 +50,20 @@ for tool in pdftoppm pdfinfo; do
     exit 1
   }
 done
+
+# Office -> PDF conversion drives these three through AppleScript. A missing app
+# is not fatal -- PDFs and images still print -- but the matching file type will
+# fail, so say which one now rather than one job at a time later.
+MISSING_OFFICE=()
+for app in "Microsoft Word" "Microsoft Excel" "Microsoft PowerPoint"; do
+  [ -d "/Applications/$app.app" ] || MISSING_OFFICE+=("$app")
+done
+if [ ${#MISSING_OFFICE[@]} -eq 0 ]; then
+  echo "Office apps present: Word, Excel, PowerPoint"
+else
+  echo "WARNING: not installed: ${MISSING_OFFICE[*]}" >&2
+  echo "         Those file types will be accepted and then fail to convert." >&2
+fi
 
 QUEUE="${SP_CUPS_QUEUE:-bw}"
 if ! lpstat -p "$QUEUE" >/dev/null 2>&1; then
@@ -102,7 +119,7 @@ say "Done"
 cat <<NOTE
 The API is on http://$(ipconfig getifaddr en0 2>/dev/null || echo '<this-mac>'):8000
 
-Two things this Mac needs that the Pi did not:
+Three things this Mac needs:
 
   1. Automatic login. A LaunchAgent only runs in a logged-in GUI session --
      required, because Office -> PDF conversion drives Word through AppleScript
@@ -111,6 +128,12 @@ Two things this Mac needs that the Pi did not:
 
   2. No sleep. System Settings -> Displays -> Advanced -> "Prevent automatic
      sleeping on power adapter when the display is off".
+
+  3. Automation permission, once per Office app. The first Word, Excel or
+     PowerPoint job pops a "school-printer wants to control ..." dialog and the
+     conversion fails until someone clicks OK. Print one of each while sitting
+     at the machine, or pre-approve under System Settings -> Privacy & Security
+     -> Automation. /health reports office.available and office.gui_session.
 
 Check it:  curl -s localhost:8000/health | python3 -m json.tool
 Logs:      tail -f $INSTALL_DIR/logs/stderr.log

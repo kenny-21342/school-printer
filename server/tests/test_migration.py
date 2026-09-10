@@ -1,8 +1,9 @@
 """Migration tests.
 
-The Pi has a live database created by the original schema. These tests build a
-database with that exact old shape and assert that init_db() upgrades it in
-place without losing rows.
+There is a live database created by the original schema (carried over from the
+Pi when the pipeline moved to the iMac). These tests build a database with that
+exact old shape and assert that init_db() upgrades it in place without losing
+rows.
 """
 from __future__ import annotations
 
@@ -68,6 +69,8 @@ def legacy_db(tmp_path, monkeypatch):
         conn.execute(
             "INSERT INTO jobs (user_id, filename, size_bytes, status, spool_path, created_at)"
             " VALUES (1, ?, 100, 'done', ?, ?)",
+            # The old /opt path is deliberate: these rows are what the Pi's
+            # database actually contained before the move to the iMac.
             (f"old{i}.pdf", f"/opt/school-printer/spool/old{i}.pdf", now))
     conn.commit()
     conn.close()
@@ -106,6 +109,11 @@ def test_legacy_db_upgrades_without_data_loss(legacy_db):
         assert u["token_version"] == 0
         assert u["failed_logins"] == 0
         assert u["lockout_until"] is None
+
+        # The conversion worker's claim column exists and is empty on old rows,
+        # so a job restored from a pre-conversion database is claimable.
+        j = conn.execute("SELECT * FROM jobs WHERE filename='old0.pdf'").fetchone()
+        assert j["conversion_claimed_at"] is None
 
         # preview_files table was created.
         conn.execute("SELECT COUNT(*) FROM preview_files")

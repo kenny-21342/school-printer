@@ -149,15 +149,115 @@ def test_layout_direction_uses_number_up_layout(client, student_auth):
     assert "cupsBackSide" not in argv
 
 
-def test_office_files_are_rejected_not_swallowed(client, student_auth):
-    """C5: these used to be accepted and then never printed, with no error."""
-    docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+KEYNOTE = "application/vnd.apple.keynote"
+
+
+def _upload_docx(client, auth, name="report.docx", **data):
+    return client.post("/print", headers=auth,
+                       files={"file": (name, b"PK\x03\x04fake", DOCX)},
+                       data=data)
+
+
+def test_office_upload_is_queued_for_conversion(client, student_auth):
+    """Office files are accepted now: the API runs on the Mac that has Word."""
+    r = _upload_docx(client, student_auth)
+    assert r.status_code == 201, r.text
+    job = r.json()
+    assert job["status"] == "converting"
+    assert job["needs_conversion"] is True
+    # Nothing has reached the printer yet.
+    assert job["cups_job_id"] is None
+    assert client.env.argv_log.read_text() == ""
+
+
+def test_conversion_worker_converts_then_prints(client, student_auth):
+    job_id = _upload_docx(client, student_auth, duplex="true").json()["id"]
+
+    assert client.env.main.run_conversions_once() == 1
+
+    job = client.get(f"/jobs/{job_id}", headers=student_auth).json()
+    assert job["status"] == "pending"
+    assert job["cups_job_id"] == 42
+
+    # The PDF is what went to lp, not the .docx, and the print options survived
+    # the round trip through the database.
+    argv = client.env.argv_log.read_text()
+    assert argv.strip().endswith(".pdf")
+    assert "sides=two-sided-long-edge" in argv
+    # The original upload is gone; only the converted PDF is kept.
+    spooled = sorted(p.suffix for p in client.env.spool.iterdir())
+    assert spooled == [".pdf"]
+
+
+def test_conversion_failure_surfaces_as_job_error(client, student_auth, monkeypatch):
+    """A student must see why their document didn't print (C5 again)."""
+    from tests.conftest import FAKE_OSASCRIPT_FAIL
+    client.env.osascript.write_text(FAKE_OSASCRIPT_FAIL)
+
+    job_id = _upload_docx(client, student_auth).json()["id"]
+    client.env.main.run_conversions_once()
+
+    job = client.get(f"/jobs/{job_id}", headers=student_auth).json()
+    assert job["status"] == "error"
+    assert job["error"]
+    assert client.env.argv_log.read_text() == ""      # never printed
+    assert list(client.env.spool.iterdir()) == []     # nothing left on disk
+
+
+def test_cancel_during_conversion_never_prints(client, student_auth):
+    job_id = _upload_docx(client, student_auth).json()["id"]
+    assert client.delete(f"/jobs/{job_id}", headers=student_auth).status_code == 204
+
+    client.env.main.run_conversions_once()
+
+    job = client.get(f"/jobs/{job_id}", headers=student_auth).json()
+    assert job["status"] == "cancelled"
+    assert client.env.argv_log.read_text() == ""
+
+
+def test_only_one_worker_can_claim_a_conversion(client, student_auth):
+    """Four uvicorn processes run this loop; a double claim prints twice."""
+    job_id = _upload_docx(client, student_auth).json()["id"]
+    main = client.env.main
+    assert main._claim_conversion(job_id) is True
+    assert main._claim_conversion(job_id) is False
+
+
+def test_stale_claim_is_retried(client, student_auth):
+    """A process that died mid-conversion must not strand the job forever."""
+    job_id = _upload_docx(client, student_auth).json()["id"]
+    main = client.env.main
+    assert main._claim_conversion(job_id) is True
+    with main.get_conn() as conn:
+        conn.execute("UPDATE jobs SET conversion_claimed_at = 0 WHERE id = ?", (job_id,))
+    assert main._claim_conversion(job_id) is True
+
+
+def test_iwork_files_are_rejected_with_a_way_out(client, student_auth):
+    """Keynote can't be converted, so say so rather than queue it forever."""
     r = client.post("/print", headers=student_auth,
-                    files={"file": ("report.docx", b"PK\x03\x04fake", docx)})
+                    files={"file": ("deck.key", b"PK\x03\x04fake", KEYNOTE)})
     assert r.status_code == 415
     assert "PDF" in r.json()["detail"]
-    # and crucially, no job row was created
     assert client.get("/jobs", headers=student_auth).json() == []
+
+
+def test_office_can_be_switched_off(client, student_auth):
+    from app.config import settings
+    settings.office_conversion_enabled = False
+    try:
+        r = _upload_docx(client, student_auth)
+    finally:
+        settings.office_conversion_enabled = True
+    assert r.status_code == 415
+    assert client.get("/jobs", headers=student_auth).json() == []
+
+
+def test_health_reports_office_status(client):
+    office = client.get("/health").json()["office"]
+    assert office["enabled"] is True
+    assert office["script_present"] is True
 
 
 def test_unsupported_mime_rejected(client, student_auth):

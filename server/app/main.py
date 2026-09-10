@@ -56,10 +56,19 @@ from .config import settings
 from .cups import PrintSettings, get_job_state, queue_options, submit_job
 from .db import get_conn, init_db
 from .deps import admin_only, current_user
-from .pdftools import is_pdf, needs_conversion, pdf_info, render_page_thumbnail
+from .office import ConversionError, convert_to_pdf, office_status
+from .pdftools import (
+    can_convert,
+    is_pdf,
+    needs_conversion,
+    office_extension_for_mime,
+    pdf_info,
+    render_page_thumbnail,
+)
 from .schemas import (
     HealthResponse,
     JobOut,
+    OfficeStatus,
     LoginRequest,
     PagePreviewResponse,
     PasswordChange,
@@ -84,6 +93,10 @@ limiter = Limiter(key_func=get_remote_address)
 # Statuses after which a job's spool file is no longer needed.
 TERMINAL_STATUSES = ("done", "cancelled", "error")
 
+# An Office upload sits here until the converter has turned it into a PDF and
+# handed that PDF to CUPS. It has no cups_job_id while in this state.
+CONVERTING = "converting"
+
 
 # --------------------------------------------------------------------------
 # Spool reaper (C3)
@@ -102,8 +115,8 @@ def _delete_spool(path: str | None) -> None:
 def sweep_spool() -> int:
     """Delete spool files whose job is finished, plus expired preview uploads.
 
-    Returns the number of files removed. Without this the Pi's SD card fills up:
-    nothing in the original code ever deleted an uploaded file.
+    Returns the number of files removed. Without this the spool directory grows
+    without bound: nothing in the original code ever deleted an uploaded file.
     """
     if settings.spool_retention_hours <= 0:
         return 0
@@ -168,12 +181,168 @@ def _start_reaper(stop: threading.Event) -> threading.Thread:
     return t
 
 
+# --------------------------------------------------------------------------
+# Office conversion worker
+# --------------------------------------------------------------------------
+#
+# Office files are accepted, spooled and left at status 'converting'. This
+# worker picks them up, drives Word/Excel/PowerPoint through AppleScript
+# (office.py), and only then hands the resulting PDF to CUPS.
+#
+# It is asynchronous because conversion takes tens of seconds: doing it inside
+# the /print request would hang the upload long past a phone's patience on
+# school Wi-Fi. The DB is the queue, so a restart mid-conversion loses nothing.
+
+
+def _print_settings_from_row(d: dict) -> PrintSettings:
+    return PrintSettings(
+        copies=d["copies"] or 1,
+        duplex=bool(d["duplex"]),
+        color_mode=d["color_mode"] or "monochrome",
+        page_range=d["page_range"],
+        paper_size=d["paper_size"],
+        orientation=d["orientation"],
+        scaling=d["scaling"],
+        layout_direction=d["layout_direction"],
+    )
+
+
+def _claim_conversion(job_id: int) -> bool:
+    """Take exclusive ownership of one job's conversion.
+
+    The UPDATE is the lock. Every worker process runs this loop, so without the
+    conditional claim the same document would be converted (and printed) once
+    per uvicorn worker. rowcount == 1 means we won.
+    """
+    now = int(time.time())
+    stale = now - settings.conversion_claim_stale_s
+    with get_conn() as conn:
+        cur = conn.execute(
+            """UPDATE jobs SET conversion_claimed_at = ?
+                WHERE id = ? AND status = ?
+                  AND (conversion_claimed_at IS NULL OR conversion_claimed_at < ?)""",
+            (now, job_id, CONVERTING, stale),
+        )
+        return cur.rowcount == 1
+
+
+def _claimable_conversions() -> list[dict]:
+    stale = int(time.time()) - settings.conversion_claim_stale_s
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT j.*, u.username FROM jobs j JOIN users u ON u.id = j.user_id
+                WHERE j.status = ?
+                  AND (j.conversion_claimed_at IS NULL OR j.conversion_claimed_at < ?)
+                ORDER BY j.id""",
+            (CONVERTING, stale),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _fail_job(job_id: int, message: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE jobs SET status='error', error=? WHERE id=?", (message[:500], job_id)
+        )
+    _release_spool(job_id)
+
+
+def _job_status(job_id: int) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+    return row["status"] if row else None
+
+
+def convert_and_submit(job: dict) -> None:
+    """Convert one claimed job's Office file and send the PDF to CUPS."""
+    job_id = job["id"]
+    src = job["spool_path"]
+    if not src:
+        _fail_job(job_id, "the uploaded file is no longer on the server")
+        return
+
+    pdf_path = settings.spool_dir / (Path(src).stem + ".pdf")
+    try:
+        convert_to_pdf(src, pdf_path)
+    except ConversionError as e:
+        log.warning("conversion failed for job %s: %s", job_id, e)
+        _delete_spool(str(pdf_path))
+        _fail_job(job_id, str(e))
+        return
+    except Exception as e:  # noqa: BLE001 - never let one job kill the worker
+        log.exception("unexpected conversion failure for job %s", job_id)
+        _delete_spool(str(pdf_path))
+        _fail_job(job_id, f"the document could not be converted ({e})")
+        return
+
+    # The student may have cancelled while Word was working. Cancelling a job
+    # with no cups_job_id only flips the row, so this is the check that stops a
+    # cancelled document from printing anyway.
+    if _job_status(job_id) != CONVERTING:
+        log.info("job %s left 'converting' during conversion; discarding", job_id)
+        _delete_spool(str(pdf_path))
+        _release_spool(job_id)
+        return
+
+    try:
+        cups_id, _out = submit_job(
+            str(pdf_path),
+            settings_obj=_print_settings_from_row(job),
+            job_title=f"{job['username']}: {job['filename']}",
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("lp submit failed for converted job %s", job_id)
+        _delete_spool(str(pdf_path))
+        _fail_job(job_id, str(e))
+        return
+
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE jobs SET status='pending', cups_job_id=?, error=NULL, spool_path=? WHERE id=?",
+            (cups_id, str(pdf_path), job_id),
+        )
+    # The original .docx has served its purpose; only the PDF is still needed,
+    # and the reaper tracks exactly one spool_path per job.
+    _delete_spool(src)
+    log.info("job %s converted and queued as %s-%s", job_id, settings.cups_queue, cups_id)
+
+
+def run_conversions_once() -> int:
+    """Convert every claimable job. Returns how many were processed.
+
+    Separate from the loop so tests can drive it deterministically.
+    """
+    done = 0
+    for job in _claimable_conversions():
+        if not _claim_conversion(job["id"]):
+            continue  # another worker process got there first
+        convert_and_submit(job)
+        done += 1
+    return done
+
+
+def _start_converter(stop: threading.Event) -> threading.Thread:
+    def loop() -> None:
+        while not stop.wait(settings.conversion_poll_interval_s):
+            try:
+                run_conversions_once()
+            except Exception:
+                log.exception("conversion sweep failed")
+
+    t = threading.Thread(target=loop, name="office-converter", daemon=True)
+    t.start()
+    return t
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     stop = threading.Event()
     with suppress(Exception):
         sweep_spool()  # one sweep at boot to clear whatever accumulated
     _start_reaper(stop)
+    if settings.office_conversion_enabled:
+        # Also picks up anything left mid-conversion by a restart.
+        _start_converter(stop)
     yield
     stop.set()
 
@@ -380,21 +549,35 @@ def create_app() -> FastAPI:
 
         mime = file.content_type or "application/octet-stream"
 
-        # Office files are rejected up front (C5). The Pi cannot convert them
-        # and the iMac relay does not exist, so the old behaviour — accept,
-        # store, mark 'pending-conversion', never process — silently swallowed
-        # the document with no error the student would ever see.
+        # Office files are converted locally now that the API runs on the iMac
+        # that has Office installed. Anything we cannot convert — Pages, Numbers,
+        # Keynote — is still refused up front, with a message the student can act
+        # on: the old behaviour of accepting and never processing them meant the
+        # document vanished with no error they would ever see (C5).
+        will_convert = False
         if needs_conversion(mime):
-            raise HTTPException(
-                415,
-                "Word/Excel/PowerPoint printing isn't available yet — "
-                "please export the document to PDF and print that instead.",
-            )
+            if not settings.office_conversion_enabled:
+                raise HTTPException(
+                    415,
+                    "Office printing is turned off on the print server right now — "
+                    "please export the document to PDF and print that instead.",
+                )
+            if not can_convert(mime):
+                raise HTTPException(
+                    415,
+                    "Pages, Numbers and Keynote files can't be printed directly — "
+                    "use Export → PDF in the app and print that instead.",
+                )
+            will_convert = True
         if settings.allowed_mimes and mime not in settings.allowed_mimes:
             raise HTTPException(415, f"unsupported file type: {mime}")
 
-        # Stream to spool, enforcing the size limit as we go.
+        # Stream to spool, enforcing the size limit as we go. The suffix matters
+        # more than usual for Office files: the converter dispatches on it to
+        # decide between Word, Excel and PowerPoint.
         suffix = Path(file.filename or "upload").suffix.lower()[:16]
+        if will_convert and suffix not in (".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"):
+            suffix = office_extension_for_mime(mime)
         spool_name = f"{int(time.time()*1000)}_{secrets.token_hex(4)}_{user['id']}{suffix}"
         spool_path = settings.spool_dir / spool_name
         size = _stream_to_spool(file, spool_path)
@@ -407,21 +590,28 @@ def create_app() -> FastAPI:
             scaling=scaling or None,
             layout_direction=layout_direction or None,
         )
-        try:
-            cups_id, _lp_out = submit_job(
-                str(spool_path),
-                settings_obj=ps,
-                job_title=f"{user['username']}: {file.filename or 'doc'}",
-            )
-            job_status = "pending"
-            err = None
-        except Exception as e:
+        if will_convert:
+            # Hand off to the conversion worker; it submits to CUPS when the PDF
+            # exists. Returning now keeps the upload request short.
             cups_id = None
-            job_status = "error"
-            err = str(e)[:500]
-            log.exception("lp submit failed")
-            # The job will never print; don't leave the upload on disk.
-            _delete_spool(str(spool_path))
+            job_status = CONVERTING
+            err = None
+        else:
+            try:
+                cups_id, _lp_out = submit_job(
+                    str(spool_path),
+                    settings_obj=ps,
+                    job_title=f"{user['username']}: {file.filename or 'doc'}",
+                )
+                job_status = "pending"
+                err = None
+            except Exception as e:
+                cups_id = None
+                job_status = "error"
+                err = str(e)[:500]
+                log.exception("lp submit failed")
+                # The job will never print; don't leave the upload on disk.
+                _delete_spool(str(spool_path))
 
         with get_conn() as conn:
             cur = conn.execute(
@@ -429,12 +619,12 @@ def create_app() -> FastAPI:
                    (user_id, filename, mime_type, size_bytes, copies, duplex, color_mode,
                     page_range, paper_size, orientation, scaling, layout_direction,
                     cups_job_id, status, error, needs_conversion, spool_path, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (user["id"], file.filename or spool_name, mime, size,
                  copies, int(duplex), color_mode,
                  page_range or None, paper_size or None, orientation or None,
                  scaling or None, layout_direction or None,
-                 cups_id, job_status, err,
+                 cups_id, job_status, err, int(will_convert),
                  None if job_status == "error" else str(spool_path), int(time.time())),
             )
             job_id = cur.lastrowid
@@ -595,11 +785,11 @@ def create_app() -> FastAPI:
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
         import socket
-        # Which socket exists depends on the host: the Debian package and the
-        # snap put it in different places on the Pi, and macOS -- where CUPS is
-        # part of the OS -- uses /var/run/cupsd. Checking only the two Linux
-        # paths made /health report cups_reachable=false on a Mac that was
-        # printing perfectly well, which is worse than not checking at all.
+        # macOS -- where CUPS is part of the OS -- uses /var/run/cupsd. The two
+        # Linux paths are kept because they cost nothing and this ran on Debian
+        # until recently; checking only those made /health report
+        # cups_reachable=false on a Mac that was printing perfectly well, which
+        # is worse than not checking at all.
         reachable = False
         for sock_path in (
             "/run/cups/cups.sock",
@@ -622,6 +812,10 @@ def create_app() -> FastAPI:
             # Empty list ⇒ raw queue ⇒ print options are silently ignored (F1).
             queue_is_raw=(len(opts) == 0),
             queue_options=opts,
+            # Whether Word/Excel/PowerPoint printing will actually work: the
+            # apps, the converter script, and — the setting people forget — a
+            # logged-in GUI session for Office to launch into.
+            office=OfficeStatus(**office_status()),
         )
 
     return app

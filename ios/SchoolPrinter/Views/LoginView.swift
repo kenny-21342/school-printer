@@ -124,13 +124,13 @@ struct ServerSettingsView: View {
                         }
                     }
                 } footer: {
-                    Text("The Pi's address, e.g. 192.168.1.106:8000. On the school Wi‑Fi this will be the Pi's school IP. http:// is added automatically.")
+                    Text("The print server's address — imac.local:8000 on the same Wi‑Fi. If the name doesn't resolve, use the iMac's IP, e.g. 192.168.1.106:8000. http:// is added automatically.")
                 }
 
                 Section {
                     Button("Save") {
                         // Only ever store a validated, normalised URL. Saving
-                        // raw text let "192.168.1.106:8000" through, which
+                        // raw text let "imac.local:8000" through, which
                         // produces a URL whose *scheme* is the IP address and
                         // fails every request with an opaque error.
                         guard let n = normalized else { return }

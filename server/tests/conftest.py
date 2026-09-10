@@ -1,8 +1,9 @@
 """Test fixtures.
 
 Every test runs against a throwaway SQLite DB and spool directory, with `lp`
-replaced by a stub script so nothing is ever sent to a real printer. The
-SP_LP_BINARY setting exists precisely for this.
+replaced by a stub script so nothing is ever sent to a real printer, and
+`osascript` replaced by one that fabricates a PDF — no test may launch Word.
+The SP_LP_BINARY and SP_OFFICE_CONVERT_BINARY settings exist precisely for this.
 """
 from __future__ import annotations
 
@@ -24,6 +25,18 @@ echo "lp: Error - scheduler not responding." >&2
 exit 1
 """
 
+# Stands in for `osascript convert-to-pdf.applescript <input> <output>`: writes
+# a real (tiny) PDF where Word would have written one.
+FAKE_OSASCRIPT = """#!/usr/bin/env bash
+echo "$@" >> "$OSA_ARGV_LOG"
+printf '%%PDF-1.4\\n1 0 obj<</Type/Catalog>>endobj\\ntrailer<</Root 1 0 R>>\\n%%%%EOF\\n' > "$3"
+"""
+
+FAKE_OSASCRIPT_FAIL = """#!/usr/bin/env bash
+echo "Microsoft Word got an error: AppleEvent handler failed." >&2
+exit 1
+"""
+
 
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
@@ -40,6 +53,13 @@ def env(tmp_path, monkeypatch):
     argv_log = tmp_path / "lp_argv.log"
     argv_log.touch()
 
+    osa = tmp_path / "fake_osascript"
+    osa.write_text(FAKE_OSASCRIPT)
+    osa.chmod(osa.stat().st_mode | stat.S_IEXEC)
+
+    osa_argv_log = tmp_path / "osa_argv.log"
+    osa_argv_log.touch()
+
     monkeypatch.setenv("SP_BASE_DIR", str(tmp_path))
     monkeypatch.setenv("SP_DATA_DIR", str(data))
     monkeypatch.setenv("SP_SPOOL_DIR", str(spool))
@@ -49,6 +69,11 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("SP_BOOTSTRAP_ADMIN_USER", "admin")
     monkeypatch.setenv("SP_SPOOL_RETENTION_HOURS", "24")
     monkeypatch.setenv("LP_ARGV_LOG", str(argv_log))
+    monkeypatch.setenv("SP_OFFICE_CONVERT_BINARY", str(osa))
+    monkeypatch.setenv("OSA_ARGV_LOG", str(osa_argv_log))
+    # The worker thread is not started in tests; they call
+    # main.run_conversions_once() so conversion happens at a known moment.
+    monkeypatch.setenv("SP_CONVERSION_POLL_INTERVAL_S", "3600")
 
     # Drop any already-imported app modules so settings are re-read.
     for mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
@@ -63,6 +88,8 @@ def env(tmp_path, monkeypatch):
         "spool": spool,
         "argv_log": argv_log,
         "lp": lp,
+        "osascript": osa,
+        "osa_argv_log": osa_argv_log,
     })
 
     for mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:

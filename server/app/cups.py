@@ -31,7 +31,7 @@ def _lp() -> str:
 def _tool(name: str) -> str:
     """Resolve a CUPS CLI tool to an absolute path.
 
-    systemd gives the service a minimal PATH, so callers must use the resolved
+    launchd gives the service a minimal PATH, so callers must use the resolved
     path rather than a bare name. Falls back to the bare name (and lets the
     subprocess call fail loudly) if the tool is not on PATH at all.
     """
@@ -164,7 +164,7 @@ def queue_options() -> list[str]:
     file through untouched and silently ignore page-ranges, sides, media,
     orientation and scaling. That is the F1 finding in the audit plan — the
     print-options UI would be controlling nothing. Surfaced via /health so it
-    can be checked without shelling into the Pi.
+    can be checked without logging into the print server.
     """
     try:
         proc = subprocess.run(

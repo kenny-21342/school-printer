@@ -38,8 +38,12 @@ enum APIError: LocalizedError {
 
 struct AppConfig {
     /// Default server URL. User can override in Settings.
-    /// The Pi's address changes between networks — see ServerSettingsView.
-    static let defaultBaseURL = "http://192.168.1.106:8000"
+    ///
+    /// A Bonjour name rather than an IP: the iMac gets a new address whenever
+    /// it moves between the home and school networks, and a hardcoded IP meant
+    /// every device had to be reconfigured by hand each time. Requires the
+    /// local-network permission, which Info.plist already declares.
+    static let defaultBaseURL = "http://imac.local:8000"
     static let userDefaultsBaseURLKey = "server.baseURL"
     static let userDefaultsUserKey = "auth.userJSON"
     /// Keychain account name for the bearer token. The token is deliberately
@@ -49,7 +53,7 @@ struct AppConfig {
     static let keychainService = "com.kenny.schoolprinter"
 
     /// Validate a user-entered server URL. Returns a normalised string, or nil.
-    /// Catches the common "192.168.1.106:8000" (no scheme) case, which
+    /// Catches the common "imac.local:8000" (no scheme) case, which
     /// otherwise produces a URL whose *scheme* is the IP address and fails
     /// every request with an opaque error.
     static func normalizeBaseURL(_ raw: String) -> String? {

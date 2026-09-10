@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     status          TEXT NOT NULL DEFAULT 'queued',
     error           TEXT,
     needs_conversion INTEGER NOT NULL DEFAULT 0,
+    -- Set when a worker takes ownership of an Office file's conversion. The
+    -- claim is what keeps four uvicorn processes from converting the same job
+    -- four times; a claim older than conversion_claim_stale_s means the process
+    -- died mid-conversion and the job is fair game again.
+    conversion_claimed_at INTEGER,
     -- Nullable: cleared once the spool file has been reaped (C3). A job row
     -- outlives the uploaded file it was created from.
     spool_path      TEXT,
@@ -95,6 +100,7 @@ def _migrate(conn) -> None:
         "scaling": "TEXT",
         "layout_direction": "TEXT",
         "needs_conversion": "INTEGER NOT NULL DEFAULT 0",
+        "conversion_claimed_at": "INTEGER",
     }
     for col, decl in additions.items():
         if col not in cols:
