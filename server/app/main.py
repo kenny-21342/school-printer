@@ -2,7 +2,7 @@
 
 Concurrency note: the request handlers below are deliberately plain `def`, not
 `async def`. They all perform blocking work — streaming uploads to disk, argon2
-hashing, `lp`/`lpstat` subprocesses, `pdftoppm` rendering, and SQLite calls.
+hashing, `lp`/`lpstat` subprocesses, `osascript` conversion, and SQLite calls.
 FastAPI runs `async def` handlers directly on the event loop, so the previous
 all-async version froze the entire server for every other user for the duration
 of any upload or slow printer query. Plain `def` handlers are dispatched to
@@ -11,7 +11,6 @@ first making every call inside them non-blocking.
 """
 from __future__ import annotations
 
-import base64
 import logging
 import secrets
 import threading
@@ -54,25 +53,16 @@ from .auth import (
 )
 from .config import settings
 from .cups import PrintSettings, get_job_state, queue_options, submit_job
-from .db import get_conn, init_db
+from .db import get_conn, init_db, startup_lock
 from .deps import admin_only, current_user
 from .office import ConversionError, convert_to_pdf, office_status
-from .pdftools import (
-    can_convert,
-    is_pdf,
-    needs_conversion,
-    office_extension_for_mime,
-    pdf_info,
-    render_page_thumbnail,
-)
+from .filetypes import can_convert, needs_conversion, office_extension_for_mime
 from .schemas import (
     HealthResponse,
     JobOut,
     OfficeStatus,
     LoginRequest,
-    PagePreviewResponse,
     PasswordChange,
-    PdfInfoResponse,
     TokenResponse,
     UserCreate,
     UserOut,
@@ -113,7 +103,7 @@ def _delete_spool(path: str | None) -> None:
 
 
 def sweep_spool() -> int:
-    """Delete spool files whose job is finished, plus expired preview uploads.
+    """Delete spool files whose job is finished.
 
     Returns the number of files removed. Without this the spool directory grows
     without bound: nothing in the original code ever deleted an uploaded file.
@@ -131,15 +121,9 @@ def sweep_spool() -> int:
                    AND created_at < ?""",
             (*TERMINAL_STATUSES, cutoff),
         ).fetchall()
-        stale_previews = conn.execute(
-            "SELECT name FROM preview_files WHERE created_at < ?", (cutoff,)
-        ).fetchall()
 
     for row in stale_jobs:
         _delete_spool(row["spool_path"])
-        removed += 1
-    for row in stale_previews:
-        _delete_spool(str(settings.spool_dir / row["name"]))
         removed += 1
 
     with get_conn() as conn:
@@ -147,11 +131,6 @@ def sweep_spool() -> int:
             conn.executemany(
                 "UPDATE jobs SET spool_path = NULL WHERE id = ?",
                 [(r["id"],) for r in stale_jobs],
-            )
-        if stale_previews:
-            conn.executemany(
-                "DELETE FROM preview_files WHERE name = ?",
-                [(r["name"],) for r in stale_previews],
             )
 
     # Belt and braces: anything in the spool dir that no table knows about and
@@ -349,8 +328,10 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     settings.ensure_dirs()
-    init_db()
-    _bootstrap_admin()
+    # One worker at a time: see startup_lock().
+    with startup_lock():
+        init_db()
+        _bootstrap_admin()
 
     app = FastAPI(
         title="School Printer Relay",
@@ -631,85 +612,6 @@ def create_app() -> FastAPI:
             row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         d = dict(row); d["username"] = user["username"]
         return JobOut(**d)
-
-    # ---------------- PDF inspection / preview ----------------
-
-    @app.post("/pdf-info", response_model=PdfInfoResponse, tags=["print"])
-    @limiter.limit("120/minute")
-    def get_pdf_info(
-        request: Request,
-        user: Annotated[dict, Depends(current_user)],
-        file: UploadFile = File(..., description="PDF to inspect"),
-    ) -> PdfInfoResponse:
-        """Upload a PDF and get back its page count + page size, without printing.
-
-        The spool copy is retained so /preview can render pages from it, and is
-        registered in preview_files so /preview can check ownership and the
-        reaper can expire it.
-        """
-        mime = file.content_type or "application/octet-stream"
-        suffix = Path(file.filename or "upload").suffix.lower()[:16]
-        spool_name = f"info_{int(time.time()*1000)}_{secrets.token_hex(4)}_{user['id']}{suffix}"
-        spool_path = settings.spool_dir / spool_name
-        _stream_to_spool(file, spool_path)
-
-        if not is_pdf(spool_path):
-            # Not a PDF — nothing to render, so don't keep the upload around.
-            _delete_spool(str(spool_path))
-            return PdfInfoResponse(
-                pages=0, page_size=None, is_pdf=False,
-                needs_conversion=needs_conversion(mime),
-            )
-
-        with get_conn() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO preview_files (name, user_id, created_at) VALUES (?,?,?)",
-                (spool_name, user["id"], int(time.time())),
-            )
-
-        meta = pdf_info(spool_path)
-        return PdfInfoResponse(
-            pages=meta.pages, page_size=meta.page_size,
-            is_pdf=True, spool_file=spool_name,
-        )
-
-    @app.get("/preview", response_model=PagePreviewResponse, tags=["print"])
-    @limiter.limit("600/minute")
-    def get_preview(
-        request: Request,
-        user: Annotated[dict, Depends(current_user)],
-        spool_file: str = Query(..., description="spool filename returned by /pdf-info upload"),
-        page: int = Query(1, ge=1),
-        width: int = Query(300, ge=64, le=1024),
-    ) -> PagePreviewResponse:
-        """Render a single page of a previously-uploaded PDF as a JPEG thumbnail."""
-        # Only ever a bare filename inside the spool dir.
-        safe = Path(spool_file).name
-        # Ownership check (H7): without this any authenticated user could render
-        # any other user's uploaded document as page images.
-        with get_conn() as conn:
-            owner = conn.execute(
-                "SELECT user_id FROM preview_files WHERE name = ?", (safe,)
-            ).fetchone()
-        if not owner:
-            raise HTTPException(404, "preview file not found (may have expired)")
-        if owner["user_id"] != user["id"] and not user["is_admin"]:
-            raise HTTPException(403, "forbidden")
-
-        spool_path = settings.spool_dir / safe
-        if not spool_path.exists():
-            raise HTTPException(404, "preview file not found (may have expired)")
-        if not is_pdf(spool_path):
-            raise HTTPException(400, "not a PDF")
-        result = render_page_thumbnail(spool_path, page=page, width_px=width)
-        if result is None:
-            raise HTTPException(500, "could not render page")
-        data, w, h = result
-        return PagePreviewResponse(
-            page=page,
-            image_base64=base64.b64encode(data).decode("ascii"),
-            width=w, height=h,
-        )
 
     @app.get("/jobs", response_model=list[JobOut], tags=["print"])
     def list_my_jobs(

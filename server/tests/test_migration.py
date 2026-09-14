@@ -14,7 +14,7 @@ import time
 import pytest
 
 # The schema exactly as it shipped before this work: jobs.spool_path NOT NULL,
-# no token_version / failed_logins / lockout_until, no preview_files table.
+# no token_version / failed_logins / lockout_until.
 LEGACY_SCHEMA = """
 CREATE TABLE users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,8 +115,9 @@ def test_legacy_db_upgrades_without_data_loss(legacy_db):
         j = conn.execute("SELECT * FROM jobs WHERE filename='old0.pdf'").fetchone()
         assert j["conversion_claimed_at"] is None
 
-        # preview_files table was created.
-        conn.execute("SELECT COUNT(*) FROM preview_files")
+        # preview_files is dropped: the endpoints that used it are gone.
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "preview_files" not in tables
 
 
 def test_migration_is_idempotent(legacy_db):

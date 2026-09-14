@@ -17,42 +17,54 @@
     - The Mac must not sleep. System Settings -> Displays -> Advanced -> "Prevent
       automatic sleeping on power adapter when the display is off", or run the
       service under `caffeinate -s`.
-    - Port 8000 binds fine without root. Do not add a privileged port here; the
+    - Port 8000 binds fine without root, which is what makes a sudo-free
+      install possible at all. Do not add a privileged port here; the
       firewall prompt on first bind is expected, and must be allowed.
 
+  This file is a TEMPLATE: @INSTALL_DIR@ is substituted by deploy-macos.sh
+  when it writes the agent into ~/Library/LaunchAgents. The install location is
+  not fixed because it depends on whether the machine gives us sudo -- a
+  home-directory install needs none, and that is what the iMac uses.
+
   Install:
-    cp deploy/com.school.printer.plist ~/Library/LaunchAgents/
-    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.school.printer.plist
-    launchctl kickstart -k gui/$(id -u)/com.school.printer
+    ./deploy/deploy-macos.sh          # writes and loads the agent for you
 
   Status and logs:
     launchctl print gui/$(id -u)/com.school.printer
-    tail -f /usr/local/school-printer/logs/stderr.log
+    tail -f <install-dir>/logs/stderr.log
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
     <string>com.school.printer</string>
 
+    <!-- Run through sh so that .env is sourced first. launchd has no
+         EnvironmentFile, the way the old systemd unit did, and pydantic-settings
+         looks for .env relative to the working directory -- which is server/,
+         not the install root. The result was a service that ignored .env
+         completely: no admin account was ever bootstrapped, the CUPS queue name
+         and the JWT secret silently fell back to defaults, and the only symptom
+         was "invalid credentials" for a password that was right.
+
+         `set -a` exports every assignment; exec keeps uvicorn as PID 1 of the
+         job so launchd's KeepAlive still tracks the real process. The file is
+         optional: `[ -f ]` keeps a missing .env from taking the service down. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/school-printer/venv/bin/uvicorn</string>
-        <string>app.main:app</string>
-        <string>--host</string>
-        <string>0.0.0.0</string>
-        <string>--port</string>
-        <string>8000</string>
-        <!-- Safe: the JWT secret is persisted to data/secret_key on first run,
-             so every worker signs with the same key, and SQLite is in WAL mode.
-             --proxy-headers is deliberately absent: with no reverse proxy in
-             front, it would let any client spoof X-Forwarded-For and walk past
-             the login rate limit. -->
-        <string>--workers</string>
-        <string>4</string>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>set -a; [ -f "@INSTALL_DIR@/.env" ] &amp;&amp; . "@INSTALL_DIR@/.env"; set +a; exec "@INSTALL_DIR@/venv/bin/uvicorn" app.main:app --host "${SP_HOST:-0.0.0.0}" --port "${SP_PORT:-8000}" --workers 4</string>
     </array>
 
+    <!-- Notes on the command above:
+         - The JWT secret is persisted to data/secret_key on first run, so all
+           four workers sign with the same key, and SQLite runs in WAL mode.
+         - --proxy-headers is deliberately absent: with no reverse proxy in
+           front, it would let any client spoof X-Forwarded-For and walk past
+           the login rate limit. -->
+
     <key>WorkingDirectory</key>
-    <string>/usr/local/school-printer/server</string>
+    <string>@INSTALL_DIR@/server</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -63,14 +75,15 @@
         <key>SP_PORT</key>
         <string>8000</string>
         <key>SP_DATA_DIR</key>
-        <string>/usr/local/school-printer/data</string>
+        <string>@INSTALL_DIR@/data</string>
         <key>SP_SPOOL_DIR</key>
-        <string>/usr/local/school-printer/spool</string>
+        <string>@INSTALL_DIR@/spool</string>
         <key>SP_DB_PATH</key>
-        <string>/usr/local/school-printer/data/printers.db</string>
-        <!-- launchd gives a minimal PATH. cups.py resolves lp and lpstat to
-             absolute paths itself, but pdftoppm and pdfinfo come from Homebrew
-             and are found on PATH, so both prefixes are listed. -->
+        <string>@INSTALL_DIR@/data/printers.db</string>
+        <!-- launchd gives a minimal PATH. cups.py and office.py resolve lp,
+             lpstat and osascript themselves, so this is a backstop; the
+             Homebrew prefixes cover both Intel (/usr/local) and Apple Silicon
+             (/opt/homebrew) machines. -->
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
@@ -86,8 +99,8 @@
     <integer>3</integer>
 
     <key>StandardOutPath</key>
-    <string>/usr/local/school-printer/logs/stdout.log</string>
+    <string>@INSTALL_DIR@/logs/stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/usr/local/school-printer/logs/stderr.log</string>
+    <string>@INSTALL_DIR@/logs/stderr.log</string>
 </dict>
 </plist>

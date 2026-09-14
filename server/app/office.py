@@ -26,6 +26,17 @@ SCRIPT = Path(__file__).parent / "scripts" / "convert-to-pdf.applescript"
 
 # Presence of the .app is what makes a format convertible. Checked for /health
 # only -- the conversion itself just tries and reports what AppleScript says.
+# Office writes one of these once it has been activated. Neither existing means
+# the apps have never been through first-run sign-in -- and an unactivated Word
+# does not fail, it *hangs*: it blocks in Office's setup wizard waiting for
+# someone to click through it, so every conversion burns the full timeout and
+# reports "took too long". Worth reporting up front.
+LICENCE_MARKERS = (
+    "/Library/Preferences/com.microsoft.office.licensingV2.plist",
+    "~/Library/Group Containers/UBF8T346G9.Office/Licenses",
+    "~/Library/Group Containers/UBF8T346G9.Office/com.microsoft.Office365.plist",
+)
+
 OFFICE_APPS = {
     "Word": "/Applications/Microsoft Word.app",
     "Excel": "/Applications/Microsoft Excel.app",
@@ -90,9 +101,16 @@ def convert_to_pdf(src: str | Path, dst: str | Path) -> None:
             )
         except subprocess.TimeoutExpired:
             _discard(dst)
+            hint = (
+                " Office does not look activated on the print server, which is "
+                "the usual cause: an unsigned-in Word blocks in its setup "
+                "wizard instead of converting."
+                if not office_licensed() else
+                " Office may be showing a dialog on the print server."
+            )
             raise ConversionError(
-                "converting this document took too long — it may be very large, "
-                "or Office may be showing a dialog on the print server"
+                "converting this document took too long — it may be very large."
+                + hint
             ) from None
         except (FileNotFoundError, OSError) as e:
             raise ConversionError(f"the document converter could not run: {e}") from e
@@ -152,20 +170,30 @@ def has_gui_session() -> bool:
     return proc.stdout.strip() == "Aqua"
 
 
+def office_licensed() -> bool:
+    """Whether Office looks activated. See LICENCE_MARKERS."""
+    return any(Path(m).expanduser().exists() for m in LICENCE_MARKERS)
+
+
 def office_status() -> dict:
     """Everything /health needs to say whether Office printing will work."""
     apps = {name: Path(p).exists() for name, p in OFFICE_APPS.items()}
     script_present = SCRIPT.exists()
     runner_present = bool(settings.office_convert_binary) or shutil.which("osascript") is not None
+    licensed = office_licensed()
     return {
         "enabled": settings.office_conversion_enabled,
+        # `licensed` is part of "available" deliberately: an installed but
+        # unactivated Word converts nothing, it just hangs for the full timeout.
         "available": (
             settings.office_conversion_enabled
             and script_present
             and runner_present
             and any(apps.values())
+            and licensed
         ),
         "gui_session": has_gui_session(),
         "script_present": script_present,
+        "licensed": licensed,
         "apps": apps,
     }

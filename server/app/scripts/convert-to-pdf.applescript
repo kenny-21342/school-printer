@@ -30,13 +30,21 @@ on run argv
         if not (exists file inputPath) then error "input file not found: " & inputPath
     end tell
 
+    -- Office wants HFS paths ("Disk:Users:me:file.docx"), not POSIX ones. Newer
+    -- builds quietly accept POSIX and older ones do not: Word 16.66 returned
+    -- nothing from `open`, so the document variable was never bound and the
+    -- failure surfaced as "The variable theDoc is not defined (-2753)" -- a
+    -- message that says nothing about the actual cause. Convert once, here.
+    set hfsIn to (POSIX file inputPath) as string
+    set hfsOut to (POSIX file outputPath) as string
+
     set ext to my getExtension(inputPath)
     if ext is in {"doc", "docx", "rtf"} then
-        my convertWithWord(inputPath, outputPath)
+        my convertWithWord(hfsIn, hfsOut)
     else if ext is in {"xls", "xlsx"} then
-        my convertWithExcel(inputPath, outputPath)
+        my convertWithExcel(hfsIn, hfsOut)
     else if ext is in {"ppt", "pptx"} then
-        my convertWithPowerPoint(inputPath, outputPath)
+        my convertWithPowerPoint(hfsIn, hfsOut)
     else
         error "unsupported extension: " & ext
     end if
@@ -44,42 +52,63 @@ on run argv
     return outputPath
 end run
 
+-- AppleScript gives any single command 120 seconds and then raises "AppleEvent
+-- timed out (-1712)" -- the export of a real document can exceed that, and the
+-- error says nothing about what happened. The ceiling that matters is the one
+-- office.py enforces (SP_OFFICE_CONVERT_TIMEOUT_S), which kills the whole
+-- osascript process; this just stops AppleScript giving up first.
+property COMMAND_TIMEOUT : 900
+
 on convertWithWord(filePath, outPath)
+    -- `set theDoc to open ...` is the snippet everyone posts, and it does not
+    -- work here: Word 16.66 returns nothing from open, leaving theDoc unbound
+    -- and failing with "The variable theDoc is not defined (-2753)". Open first,
+    -- then take `active document` -- which is what the return value would have
+    -- been, and is stable across Word versions.
     tell application "Microsoft Word"
-        set theDoc to open file name filePath with read only
-        try
-            save as theDoc file name outPath file format format PDF
-        on error errMsg number errNum
+        with timeout of COMMAND_TIMEOUT seconds
+            open file name filePath
+            set theDoc to active document
+            try
+                save as theDoc file name outPath file format format PDF
+            on error errMsg number errNum
+                close theDoc saving no
+                error errMsg number errNum
+            end try
             close theDoc saving no
-            error errMsg number errNum
-        end try
-        close theDoc saving no
+        end timeout
     end tell
 end convertWithWord
 
 on convertWithExcel(filePath, outPath)
     tell application "Microsoft Excel"
-        set theBook to open workbook workbook file name filePath
-        try
-            save workbook as theBook filename outPath file format PDF file format
-        on error errMsg number errNum
+        with timeout of COMMAND_TIMEOUT seconds
+            open workbook workbook file name filePath
+            set theBook to active workbook
+            try
+                save workbook as theBook filename outPath file format PDF file format
+            on error errMsg number errNum
+                close theBook saving no
+                error errMsg number errNum
+            end try
             close theBook saving no
-            error errMsg number errNum
-        end try
-        close theBook saving no
+        end timeout
     end tell
 end convertWithExcel
 
 on convertWithPowerPoint(filePath, outPath)
     tell application "Microsoft PowerPoint"
-        set thePres to open filePath
-        try
-            save thePres in outPath as save as PDF
-        on error errMsg number errNum
+        with timeout of COMMAND_TIMEOUT seconds
+            open filePath
+            set thePres to active presentation
+            try
+                save thePres in outPath as save as PDF
+            on error errMsg number errNum
+                close thePres saving no
+                error errMsg number errNum
+            end try
             close thePres saving no
-            error errMsg number errNum
-        end try
-        close thePres saving no
+        end timeout
     end tell
 end convertWithPowerPoint
 

@@ -33,6 +33,7 @@ school-printer/
 │   ├── app/
 │   │   ├── main.py         # endpoints + the conversion worker
 │   │   ├── office.py       # Office → PDF via AppleScript
+│   │   ├── filetypes.py    # what prints directly, what needs converting
 │   │   ├── scripts/convert-to-pdf.applescript
 │   │   ├── auth.py         # argon2 hashing + JWT
 │   │   ├── cups.py         # lp wrapper
@@ -54,12 +55,19 @@ school-printer/
 ## Setting up the iMac
 
 ```bash
-brew install poppler                                   # pdftoppm, pdfinfo (previews)
+# Python 3.11+; uv needs no sudo and no Xcode tools, which matters on an
+# older macOS where Homebrew has no bottles:
+curl -LsSf https://astral.sh/uv/install.sh | sh && uv python install 3.13
+
 lpadmin -p bw -v ipp://10.2.20.170/ipp/print -m everywhere -E
-./deploy/deploy-macos.sh                               # run ON the iMac
+PYTHON="$(uv python find 3.13)" ./deploy/deploy-macos.sh     # run ON the iMac
 ```
 
-Then three settings that are not optional, all consequences of one fact — the
+Installs to `~/school-printer` by default — no sudo anywhere, because the
+service binds an unprivileged port and keeps its state in one directory. Set
+`INSTALL_DIR` to put it elsewhere.
+
+Then four things that are not optional, most of them consequences of one fact — the
 service runs as a **LaunchAgent**, because AppleScript can only drive Word,
 Excel and PowerPoint inside a logged-in GUI session:
 
@@ -67,7 +75,13 @@ Excel and PowerPoint inside a logged-in GUI session:
    is down after every restart.
 2. **No sleep**: Displays → Advanced → "Prevent automatic sleeping on power
    adapter when the display is off".
-3. **Automation permission**, once per Office app: the first Word job pops a
+3. **Office signed in, once per app.** Open Word, Excel and PowerPoint at the
+   machine and complete the first-run/activation wizard. This is not optional
+   and it fails in the worst way: an unactivated Word does not error, it blocks
+   in Office's setup UI (`SetupUI_ShowUIFlowWithEntryPoint` in a `sample` of the
+   process), so every job sits in "Converting…" for the full timeout and then
+   reports that it took too long. `/health` reports `office.licensed`.
+4. **Automation permission**, once per Office app: the first Word job pops a
    "school-printer wants to control Microsoft Word" dialog and fails until
    someone clicks OK. Print one of each while sitting at the machine, or
    pre-approve under Privacy & Security → Automation.
@@ -87,8 +101,6 @@ print and every Office file would fail — the most confusing possible split.
 | PATCH  | `/users/{id}`                | admin  | Update user (password, etc)       |
 | DELETE | `/users/{id}`                | admin  | Delete user                       |
 | POST   | `/print`                     | user   | Upload + print (multipart)        |
-| POST   | `/pdf-info`                  | user   | Page count / size, no printing    |
-| GET    | `/preview`                   | user   | Render one page as a thumbnail    |
 | GET    | `/jobs`                      | user   | List jobs (`?include_all=true` admin) |
 | GET    | `/jobs/{id}`                 | user   | Job detail                        |
 | POST   | `/jobs/{id}/refresh`         | user   | Sync status from CUPS             |
@@ -154,7 +166,9 @@ when the iMac's IP changes between networks. Users can override it in Settings
    ```
 3. Confirm `imac.local` resolves from an iPad; if not, set the server URL in the
    app's Settings to the iMac's school IP (and ask for a DHCP reservation).
-4. Check `/health`: `cups_reachable`, `queue_is_raw: false`, `office.available`.
+4. Check `/health`: `cups_reachable`, `queue_is_raw: false`, and
+   `office.available` (which is false unless Office is both installed *and*
+   activated).
 
 ## Security notes
 
@@ -167,6 +181,9 @@ when the iMac's IP changes between networks. Users can override it in Settings
 - File uploads limited to 50 MB, MIME-type allowlist.
 - Spool files are deleted once a job finishes, and swept hourly
   (`SP_SPOOL_RETENTION_HOURS`). A converted job keeps only the PDF.
+- Page previews are rendered on the device with PDFKit and never leave it. The
+  server has no preview endpoint to attack: `/pdf-info` and `/preview` were
+  removed once the client stopped calling them.
 - Office conversion opens uploaded documents in real Word/Excel/PowerPoint. Macro
   execution is off by default in Office, and files arrive from authenticated
   users only, but this is the one place where student input reaches a GUI app —
@@ -207,7 +224,7 @@ lpoptions -p bw -l        # should now list real options
 ```bash
 cd server
 pip install -e '.[dev]'
-pytest tests/ -q          # 46 tests; no printer and no Office required
+pytest tests/ -q          # 43 tests; no printer and no Office required
 ```
 
 `lp` and `osascript` are both stubbed, so the suite never touches the printer

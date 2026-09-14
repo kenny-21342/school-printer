@@ -27,7 +27,6 @@ struct PrintView: View {
                 Button { showPicker = true } label: { Label("Pick", systemImage: "folder.badge.plus") }
             }
         }
-        .onAppear { previewCache.api = api }
         .sheet(isPresented: $showPicker) {
             DocPicker { url, name, mime in
                 self.pickedURL = url
@@ -35,7 +34,6 @@ struct PrintView: View {
                 self.pickedMime = mime
                 self.resultMessage = nil
                 self.options = PrintOptions()   // don't carry settings across files
-                previewCache.api = api
                 Task { await previewCache.loadInfo(fileURL: url) }
             }
         }
@@ -163,17 +161,13 @@ struct PrintView: View {
         guard !range.isEmpty else { return true }
         // Only validate when we actually know the page count; for files with no
         // known count the range is left empty by PrintOptionsView anyway.
-        guard let info = previewCache.pdfInfo, info.pages > 0 else { return true }
-        return parseCustomPages(range, max: info.pages) != nil
+        guard previewCache.pageCount > 0 else { return true }
+        return parseCustomPages(range, max: previewCache.pageCount) != nil
     }
 
     private func clearPick() {
         pickedURL = nil; pickedName = ""
-        previewCache.pdfInfo = nil
-        previewCache.thumbnails.removeAll()
-        previewCache.loadedPages.removeAll()
-        previewCache.previewUnavailable = false
-        previewCache.error = nil
+        previewCache.reset()
     }
 
     private func submit() async {

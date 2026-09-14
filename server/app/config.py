@@ -5,7 +5,7 @@ import secrets
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .pdftools import CONVERTIBLE_MIMES
+from .filetypes import CONVERTIBLE_MIMES
 
 
 class Settings(BaseSettings):

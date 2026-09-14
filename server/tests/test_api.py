@@ -361,41 +361,6 @@ def test_cancel_marks_job_and_frees_spool(client, student_auth):
 
 
 # --------------------------------------------------------------------------
-# Preview
-# --------------------------------------------------------------------------
-
-def test_pdf_info_and_preview_ownership(client, admin_auth, student_auth):
-    """H7: previews were readable by any authenticated user."""
-    r = client.post("/pdf-info", headers=student_auth,
-                    files={"file": ("doc.pdf", MINIMAL_PDF, "application/pdf")})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["is_pdf"] is True
-    spool_file = body["spool_file"]
-    assert spool_file
-
-    client.post("/users", headers=admin_auth,
-                json={"username": "mallory", "password": "mallory123"})
-    mallory = {"Authorization": f"Bearer {_token(client, 'mallory', 'mallory123')}"}
-
-    r = client.get(f"/preview?spool_file={spool_file}&page=1", headers=mallory)
-    assert r.status_code == 403
-
-
-def test_preview_rejects_path_traversal(client, student_auth):
-    r = client.get("/preview?spool_file=../../../../etc/passwd&page=1", headers=student_auth)
-    assert r.status_code == 404
-
-
-def test_pdf_info_on_non_pdf_does_not_retain_file(client, student_auth):
-    r = client.post("/pdf-info", headers=student_auth,
-                    files={"file": ("note.txt", b"hello", "text/plain")})
-    assert r.status_code == 200
-    assert r.json()["is_pdf"] is False
-    assert list(client.env.spool.iterdir()) == []
-
-
-# --------------------------------------------------------------------------
 # Spool reaper
 # --------------------------------------------------------------------------
 

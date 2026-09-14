@@ -1,6 +1,7 @@
 """SQLite database layer."""
 from __future__ import annotations
 
+import fcntl
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -61,22 +62,31 @@ CREATE TABLE IF NOT EXISTS jobs (
 )
 """
 
-# Tracks files uploaded via /pdf-info purely for preview rendering, so that
-# /preview can verify the requester owns the file it is being asked to render
-# (H7) and so the reaper knows when they were created (C3).
-_PREVIEW_TABLE = """
-CREATE TABLE IF NOT EXISTS preview_files (
-    name       TEXT PRIMARY KEY,
-    user_id    INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
-)
-"""
-
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)",
-    "CREATE INDEX IF NOT EXISTS idx_preview_created ON preview_files(created_at)",
 )
+
+
+@contextmanager
+def startup_lock() -> Iterator[None]:
+    """Serialize schema creation and admin bootstrap across worker processes.
+
+    uvicorn starts four workers at once and every one of them imports the app,
+    so all four ran init_db() simultaneously against a brand-new database. Two
+    of them died with "database is locked" -- the migration takes BEGIN
+    IMMEDIATE and `PRAGMA journal_mode=WAL` wants a brief exclusive lock, which
+    SQLite refuses outright rather than waiting. The service came up on the
+    surviving workers, so this looked healthy from outside while running at half
+    capacity.
+    """
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    with open(settings.data_dir / "startup.lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def init_db() -> None:
@@ -84,7 +94,6 @@ def init_db() -> None:
     with get_conn() as conn:
         conn.execute(_USERS_TABLE)
         conn.execute(_JOBS_TABLE)
-        conn.execute(_PREVIEW_TABLE)
         for stmt in _INDEXES:
             conn.execute(stmt)
         _migrate(conn)
@@ -120,6 +129,12 @@ def _migrate(conn) -> None:
     for col, decl in user_additions.items():
         if col not in ucols:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
+
+    # The /pdf-info and /preview endpoints are gone, and with them this table.
+    # It only ever held bookkeeping for preview uploads -- no job history -- so
+    # dropping it loses nothing. The files themselves are swept by sweep_spool's
+    # orphan pass.
+    conn.execute("DROP TABLE IF EXISTS preview_files")
 
     _relax_spool_path_not_null(conn)
 
@@ -184,7 +199,14 @@ def get_conn() -> Iterator[sqlite3.Connection]:
         check_same_thread=False,
     )
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # WAL is a property of the database file, so it survives once any connection
+    # has set it. Another process holding a write lock makes this fail
+    # immediately rather than waiting on busy_timeout, and that is not worth
+    # killing a worker over.
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=30000")

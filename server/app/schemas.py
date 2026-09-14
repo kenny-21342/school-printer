@@ -94,6 +94,10 @@ class OfficeStatus(BaseModel):
     available: bool
     gui_session: bool
     script_present: bool
+    # False when Office has never been signed in on this machine. An unactivated
+    # Word hangs in its first-run wizard rather than failing, so a job just
+    # times out with nothing to point at.
+    licensed: bool = False
     apps: dict[str, bool] = {}
 
 
@@ -107,18 +111,3 @@ class HealthResponse(BaseModel):
     queue_is_raw: bool = False
     queue_options: list[str] = []
     office: Optional[OfficeStatus] = None
-
-
-class PdfInfoResponse(BaseModel):
-    pages: int
-    page_size: Optional[str] = None
-    is_pdf: bool
-    spool_file: Optional[str] = None
-    needs_conversion: bool = False
-
-
-class PagePreviewResponse(BaseModel):
-    page: int
-    image_base64: str
-    width: int
-    height: int

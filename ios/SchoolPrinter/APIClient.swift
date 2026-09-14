@@ -248,27 +248,6 @@ final class APIClient: ObservableObject {
         )
     }
 
-    /// Upload a PDF to the server to inspect page count (does not print).
-    func uploadForInfo(
-        fileURL: URL, filename: String, mimeType: String
-    ) async throws -> PdfInfo {
-        try await upload(
-            path: "/pdf-info",
-            fileURL: fileURL, filename: filename, mimeType: mimeType,
-            fields: [:], as: PdfInfo.self
-        )
-    }
-
-    /// Fetch a JPEG thumbnail of a single page from a previously-uploaded PDF.
-    func fetchPreview(spoolFile: String, page: Int, width: Int = 200) async throws -> PagePreview {
-        let req = try makeRequest("/preview", query: [
-            URLQueryItem(name: "spool_file", value: spoolFile),
-            URLQueryItem(name: "page", value: String(page)),
-            URLQueryItem(name: "width", value: String(width)),
-        ])
-        return try await run(req, as: PagePreview.self)
-    }
-
     // MARK: - Streaming multipart upload
 
     /// Builds the multipart body on DISK and uploads with `uploadTask(from:)`.

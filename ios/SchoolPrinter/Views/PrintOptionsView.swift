@@ -7,128 +7,81 @@ import PDFKit
 final class PreviewCache: ObservableObject {
     @Published var thumbnails: [Int: UIImage] = [:]
     @Published var loadedPages: Set<Int> = []
-    @Published var pdfInfo: PdfInfo?
-    @Published var spoolFile: String?
     @Published var error: String?
 
-    /// Injected from the environment once the view appears. Optional rather
-    /// than a throwaway placeholder instance: the old code constructed a second
-    /// APIClient in PrintView.init() whose @Published state nothing observed.
-    var api: APIClient?
-
-    var pageCount: Int { pdfInfo?.pages ?? 0 }
+    /// Pages in the picked document, 0 when it is not a PDF.
+    @Published private(set) var pageCount = 0
 
     /// Local PDF document for on-device rendering (no network needed).
     private var pdfDocument: PDFDocument?
-    private var localFileURL: URL?
 
     /// True when the picked file has no page preview available (image, text).
     /// Distinct from "still loading", so the UI can stop showing a spinner
     /// forever for files it will never be able to preview.
     @Published var previewUnavailable = false
 
-    /// Inspect the picked file. Everything happens on-device — no upload.
-    func loadInfo(fileURL: URL) async {
-        error = nil; thumbnails.removeAll(); loadedPages.removeAll()
-        localFileURL = fileURL
+    /// Forget the current document. Called when the user clears the picked
+    /// file, so a stale page count cannot outlive it and re-enable the page
+    /// controls for a file that has none.
+    func reset() {
+        thumbnails.removeAll()
+        loadedPages.removeAll()
         pdfDocument = nil
-        spoolFile = nil
+        pageCount = 0
         previewUnavailable = false
+        error = nil
+    }
 
-        // For PDFs: render locally with PDFKit — instant, no upload needed.
+    /// Inspect the picked file. Everything happens on-device — no upload, and
+    /// no server involvement at all: the old /pdf-info and /preview round trips
+    /// were replaced by PDFKit and have now been deleted from both ends.
+    func loadInfo(fileURL: URL) async {
+        reset()
+
         let accessing = fileURL.startAccessingSecurityScopedResource()
         defer { if accessing { fileURL.stopAccessingSecurityScopedResource() } }
 
         if let doc = PDFDocument(url: fileURL), doc.pageCount > 0 {
             self.pdfDocument = doc
-            self.pdfInfo = PdfInfo(
-                pages: doc.pageCount,
-                page_size: nil,
-                is_pdf: true,
-                spool_file: nil,
-                needs_conversion: false
-            )
+            self.pageCount = doc.pageCount
             return
         }
 
-        // Not a PDF. Do NOT upload it to /pdf-info: the server cannot compute a
-        // page count for non-PDFs (it returns pages: 0 and discards the file),
-        // so the old fallback burned a full upload of the user's document over
-        // school Wi-Fi to learn nothing.
-        self.pdfInfo = PdfInfo(
-            pages: 0, page_size: nil, is_pdf: false,
-            spool_file: nil, needs_conversion: false
-        )
+        // Not a PDF — an image, a text file, or an Office document the server
+        // will convert. Nothing to page through.
         self.previewUnavailable = true
     }
 
-    /// Render a page locally via PDFKit (no network). Falls back to server for non-PDFs.
+    /// Render a page locally via PDFKit.
     func ensureLoaded(_ page: Int) async {
         guard !loadedPages.contains(page) else { return }
+        guard let doc = pdfDocument, let pdfPage = doc.page(at: page - 1) else { return }
 
-        // Local PDF rendering
-        if let doc = pdfDocument, let pdfPage = doc.page(at: page - 1) {
-            loadedPages.insert(page)
-            let bounds = pdfPage.bounds(for: .mediaBox)
-            let scale = min(400.0 / bounds.width, 400.0 / bounds.height)
-            let sz = CGSize(width: bounds.width * scale, height: bounds.height * scale)
-            let renderer = UIGraphicsImageRenderer(size: sz)
-            let img = renderer.image { ctx in
-                UIColor.white.setFill()
-                ctx.fill(CGRect(origin: .zero, size: sz))
-                ctx.cgContext.saveGState()
-                ctx.cgContext.translateBy(x: 0, y: sz.height)
-                ctx.cgContext.scaleBy(x: scale, y: -scale)
-                pdfPage.draw(with: .mediaBox, to: ctx.cgContext)
-                ctx.cgContext.restoreGState()
-            }
-            thumbnails[page] = img
-            return
+        loadedPages.insert(page)
+        let bounds = pdfPage.bounds(for: .mediaBox)
+        let scale = min(400.0 / bounds.width, 400.0 / bounds.height)
+        let sz = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        let renderer = UIGraphicsImageRenderer(size: sz)
+        let img = renderer.image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(origin: .zero, size: sz))
+            ctx.cgContext.saveGState()
+            ctx.cgContext.translateBy(x: 0, y: sz.height)
+            ctx.cgContext.scaleBy(x: scale, y: -scale)
+            pdfPage.draw(with: .mediaBox, to: ctx.cgContext)
+            ctx.cgContext.restoreGState()
         }
-
-        // Server fallback, used only when a spool file was registered.
-        // `loadedPages` is marked only on success (M9): the old code inserted
-        // up front and removed on failure only in this branch, so a failed
-        // local render left a permanent spinner.
-        guard let sf = spoolFile, let api else { return }
-        do {
-            let prev = try await api.fetchPreview(spoolFile: sf, page: page, width: 400)
-            if let img = UIImage(data: Data(base64Encoded: prev.image_base64) ?? Data()) {
-                thumbnails[page] = img
-                loadedPages.insert(page)
-            }
-        } catch {
-            // leave the page unloaded so it can be retried
-        }
+        thumbnails[page] = img
     }
 
-    /// Prefetch a window of pages around `center`.
+    /// Prefetch a window of pages around `center`. Local rendering is fast
+    /// enough to just do them in order.
     func prefetchAround(_ center: Int, window: Int = 3) async {
         guard pageCount > 0 else { return }
         let lo = max(1, center - window)
         let hi = min(pageCount, center + window)
-        var toFetch: [Int] = []
-        for p in lo...hi where !loadedPages.contains(p) { toFetch.append(p) }
-        guard !toFetch.isEmpty else { return }
-
-        // Local rendering is fast — just do them all at once
-        if pdfDocument != nil {
-            for page in toFetch { await ensureLoaded(page) }
-            return
-        }
-
-        // Server path: bounded concurrency. Rewritten as a simple chunked loop —
-        // the previous hand-rolled inflight counter could decrement below zero
-        // when group.next() returned nil.
-        let maxConcurrent = 3
-        for chunk in stride(from: 0, to: toFetch.count, by: maxConcurrent).map({
-            Array(toFetch[$0..<min($0 + maxConcurrent, toFetch.count)])
-        }) {
-            await withTaskGroup(of: Void.self) { group in
-                for page in chunk {
-                    group.addTask { [weak self] in await self?.ensureLoaded(page) }
-                }
-            }
+        for page in lo...hi where !loadedPages.contains(page) {
+            await ensureLoaded(page)
         }
     }
 

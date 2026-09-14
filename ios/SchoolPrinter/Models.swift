@@ -142,17 +142,3 @@ struct Job: Codable, Identifiable, Equatable {
     var printedDate: Date? { printed_at.map { Date(timeIntervalSince1970: TimeInterval($0)) } }
 }
 
-struct PdfInfo: Codable {
-    let pages: Int
-    let page_size: String?
-    let is_pdf: Bool
-    let spool_file: String?
-    let needs_conversion: Bool
-}
-
-struct PagePreview: Codable {
-    let page: Int
-    let image_base64: String
-    let width: Int
-    let height: Int
-}
