@@ -1,11 +1,10 @@
 # School Printer
 
 The iMac's CUPS `bw` queue uses the Fujifilm driver and sends jobs to the
-campus print cluster at `lpd://10.2.20.170/sjbw`. The intended student workflow
-is native printing to `ipp://imac.local:631/printers/bw` from each device's
-Print dialog, then logging in at any campus printer to select and release the
-job. The legacy iOS app and upload relay remain installed until device and
-school network tests pass.
+campus print cluster at `lpd://10.2.20.170/sjbw`. The immediate goal is a
+personal-use pilot: print to `ipp://imac.local:631/printers/bw` from a device's
+Print dialog, then log in at a campus printer to select and release the job.
+The legacy iOS app and upload relay remain installed during the pilot.
 
 ## Native IPP rollout
 
@@ -21,15 +20,16 @@ monochrome as the default, and checks the queue's IPP attributes. It asks for
 the iMac administrator password locally because CUPS rejects a filter owned by
 an ordinary user. Keep the driver files and PPD out of Git.
 
-The student printer URL is `ipp://imac.local:631/printers/bw` (or use the
-iMac's reserved school IP if `.local` discovery is unavailable). CUPS advertises
-the queue with Bonjour on the local subnet. Confirm AirPrint discovery on an
-iPhone/iPad before adding any extra Bonjour service for this same queue.
+The printer URL is `ipp://imac.local:631/printers/bw` (or use the iMac's
+reserved school IP if `.local` discovery is unavailable). CUPS advertises the
+same queue with Bonjour's `_universal` AirPrint subtype on the local subnet;
+it does not create a second destination. An iPhone/iPad Print-dialog test is
+still needed to confirm discovery and printing.
 School IT must confirm client reachability on TCP 631 and mDNS discovery on
 UDP 5353, including any VLAN boundaries. Use the school's approved student
 subnets for the CUPS/firewall access rule.
 
-### School account identity gate
+### School account identity
 
 Campus release uses **school accounts, not Mac local accounts**. The Fujifilm
 driver has separate User ID, Passcode, and Account ID settings. CUPS currently
@@ -37,23 +37,31 @@ accepts IPP print jobs from the local subnet without school authentication.
 In a held test, the remote client supplied the job username and CUPS recorded
 that name. In a separate local filter probe, the Fujifilm driver wrote the
 supplied job username into its print data but left Account ID empty. A device's
-OS username must therefore not be assumed
-to identify its school account. The two initial PDF jobs were submitted as
+OS username must therefore not be assumed to identify its school account. The
+two initial PDF jobs were submitted as
 `kenny_lhs`; their appearance under a school account is unverified.
 
-School IT needs to confirm how its print system associates a native IPP job
-with a student's account, including whether a school User ID, Account ID, or
-passcode must be embedded by the driver. Test with two distinct school accounts
-and confirm that each sees only their own job at a campus printer. Do not
-create Mac local accounts as a substitute for this mapping.
+For the personal pilot, check whether one of those jobs appears after logging
+in at a campus printer with your school account. If it does, release it and
+check the printed page. If it does not, ask school IT how their print system
+associates the job with your account, including whether the Fujifilm driver
+must supply a school User ID, Account ID, or passcode. The library iMacs may
+work because users log into macOS with school network accounts; this iMac is
+currently configured with only local directory search.
 
-Do not retire the iOS app or relay until a PDF and a Word document from each
-target platform appear under the
-correct student's campus account, can be released at a chosen printer, and
-copies, duplex, A4, and monochrome output have been checked on paper. CUPS
-accepting a job only proves delivery to the campus cluster; it does not prove
-that a student can see or release it. The Mac's print queue tools handle staff
-job management before release.
+For the iPhone/iPad test, join the school student Wi-Fi, open a PDF, choose
+**Share → Print**, and select **bw @ iMac**. Submit one page, then log in at a
+campus printer with your school account and check whether that job appears.
+Report separately whether the queue was discovered, CUPS received the job,
+and your school account could release it; each checks a different part of the
+route.
+
+For broader student rollout, school IT should confirm the account mapping and
+test two distinct school accounts, verifying that each sees only their own
+jobs. Keep the iOS app and relay until PDF and Word printing from each target
+platform, release at a campus printer, copies, duplex, A4, and monochrome
+output all pass. CUPS accepting a job only proves delivery to the campus
+cluster; it does not prove that a user can see or release it.
 
 To roll back a failed sharing change on the iMac, run
 `lpadmin -p bw -o printer-is-shared=false` and `cupsctl --no-share-printers`.

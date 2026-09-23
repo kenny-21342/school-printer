@@ -70,7 +70,9 @@ sudo /usr/sbin/chown -R root:wheel "$DRIVER_TARGET"
 # working LPD URI and Fujifilm PPD; CUPS exposes this one queue via IPP.
 /usr/sbin/lpadmin -p "$QUEUE" -v "$DEVICE_URI" -P "$PPD_SOURCE" -E
 /usr/sbin/lpadmin -p "$QUEUE" -o FFColorMode=Black -o printer-is-shared=true
-/usr/sbin/cupsctl --share-printers
+# Advertise the same CUPS queue in the Bonjour subtype used by AirPrint.
+# CUPS builds the service's document-format TXT data from the queue itself.
+/usr/sbin/cupsctl --share-printers BrowseDNSSDSubTypes=_cups,_universal
 
 /usr/bin/lpstat -t
 /usr/bin/lpoptions -p "$QUEUE" -l | /usr/bin/grep -E '^(Duplex|PageSize|FFColorMode)/'
