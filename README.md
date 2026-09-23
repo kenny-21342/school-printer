@@ -27,8 +27,28 @@ the queue with Bonjour on the local subnet. Confirm AirPrint discovery on an
 iPhone/iPad before adding any extra Bonjour service for this same queue.
 School IT must confirm client reachability on TCP 631 and mDNS discovery on
 UDP 5353, including any VLAN boundaries. Use the school's approved student
-subnets for the CUPS/firewall access rule. Do not retire the iOS app or relay
-until a PDF and a Word document from each target platform appear under the
+subnets for the CUPS/firewall access rule.
+
+### School account identity gate
+
+Campus release uses **school accounts, not Mac local accounts**. The Fujifilm
+driver has separate User ID, Passcode, and Account ID settings. CUPS currently
+accepts IPP print jobs from the local subnet without school authentication.
+In a held test, the remote client supplied the job username and CUPS recorded
+that name. In a separate local filter probe, the Fujifilm driver wrote the
+supplied job username into its print data but left Account ID empty. A device's
+OS username must therefore not be assumed
+to identify its school account. The two initial PDF jobs were submitted as
+`kenny_lhs`; their appearance under a school account is unverified.
+
+School IT needs to confirm how its print system associates a native IPP job
+with a student's account, including whether a school User ID, Account ID, or
+passcode must be embedded by the driver. Test with two distinct school accounts
+and confirm that each sees only their own job at a campus printer. Do not
+create Mac local accounts as a substitute for this mapping.
+
+Do not retire the iOS app or relay until a PDF and a Word document from each
+target platform appear under the
 correct student's campus account, can be released at a chosen printer, and
 copies, duplex, A4, and monochrome output have been checked on paper. CUPS
 accepting a job only proves delivery to the campus cluster; it does not prove

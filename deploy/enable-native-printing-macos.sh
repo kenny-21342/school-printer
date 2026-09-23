@@ -77,3 +77,4 @@ sudo /usr/sbin/chown -R root:wheel "$DRIVER_TARGET"
 /usr/bin/ipptool -q "ipp://localhost:631/printers/$QUEUE" /usr/share/cups/ipptool/get-printer-attributes.test
 echo "Backup: $BACKUP"
 echo "Shared printer: ipp://$(/usr/sbin/scutil --get LocalHostName).local:631/printers/$QUEUE"
+echo 'School account mapping remains to be verified; CUPS does not authenticate native IPP jobs against school accounts.'
