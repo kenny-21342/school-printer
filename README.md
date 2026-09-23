@@ -1,13 +1,53 @@
-# School Printer Relay
+# School Printer
 
-iPhone/iPad → iMac → FUJIFILM Xerox "bw" (`ipp://10.2.20.170/ipp/print`)
+The iMac's CUPS `bw` queue uses the Fujifilm driver and sends jobs to the
+campus print cluster at `lpd://10.2.20.170/sjbw`. The intended student workflow
+is native printing to `ipp://imac.local:631/printers/bw` from each device's
+Print dialog, then logging in at any campus printer to select and release the
+job. The legacy iOS app and upload relay remain installed until device and
+school network tests pass.
 
-## Architecture
+## Native IPP rollout
+
+The printer's advertised `/ipp/print` endpoint returns
+`client-error-not-found`. Keep the Fujifilm PPD and LPD URI; CUPS exposes that
+same queue to clients over IPP. Do not create a second destination.
+
+On the iMac, stage the Fujifilm driver folder and original `bw.ppd` from a Mac
+that already prints successfully in `/Users/Shared/school-printer-drivers/`.
+Run `deploy/enable-native-printing-macos.sh` **on the iMac**. It takes a backup
+of CUPS and relay state, installs the filter as root, creates/shares `bw`, sets
+monochrome as the default, and checks the queue's IPP attributes. It asks for
+the iMac administrator password locally because CUPS rejects a filter owned by
+an ordinary user. Keep the driver files and PPD out of Git.
+
+The student printer URL is `ipp://imac.local:631/printers/bw` (or use the
+iMac's reserved school IP if `.local` discovery is unavailable). CUPS advertises
+the queue with Bonjour on the local subnet. Confirm AirPrint discovery on an
+iPhone/iPad before adding any extra Bonjour service for this same queue.
+School IT must confirm client reachability on TCP 631 and mDNS discovery on
+UDP 5353, including any VLAN boundaries. Use the school's approved student
+subnets for the CUPS/firewall access rule. Do not retire the iOS app or relay
+until a PDF and a Word document from each target platform appear under the
+correct student's campus account, can be released at a chosen printer, and
+copies, duplex, A4, and monochrome output have been checked on paper. CUPS
+accepting a job only proves delivery to the campus cluster; it does not prove
+that a student can see or release it. The Mac's print queue tools handle staff
+job management before release.
+
+To roll back a failed sharing change on the iMac, run
+`lpadmin -p bw -o printer-is-shared=false` and `cupsctl --no-share-printers`.
+The script prints its backup directory, which contains the previous CUPS
+configuration and relay state.
+
+## Legacy upload relay
+
+### Architecture
 
 ```
-┌──────────────┐   HTTPS/multipart   ┌────────────────────────────────┐   IPP    ┌────────────────┐
-│   iOS app    │ ──────────────────> │ iMac: FastAPI + JWT + SQLite   │ ───────> │ FUJIFILM Xerox │
-│ SchoolPrinter│    (Bearer token)   │  + CUPS + Microsoft Office     │          │  (10.2.20.170) │
+┌──────────────┐   HTTP/multipart    ┌────────────────────────────────┐   LPD    ┌────────────────┐
+│   iOS app    │ ──────────────────> │ iMac: FastAPI + JWT + SQLite   │ ───────> │ campus print   │
+│ SchoolPrinter│    (Bearer token)   │  + CUPS + Microsoft Office     │          │ cluster + login│
 └──────────────┘                     └────────────────────────────────┘          └────────────────┘
 ```
 
@@ -59,7 +99,7 @@ school-printer/
 # older macOS where Homebrew has no bottles:
 curl -LsSf https://astral.sh/uv/install.sh | sh && uv python install 3.13
 
-lpadmin -p bw -v ipp://10.2.20.170/ipp/print -m everywhere -E
+# Create and share bw with deploy/enable-native-printing-macos.sh instead.
 PYTHON="$(uv python find 3.13)" ./deploy/deploy-macos.sh     # run ON the iMac
 ```
 
@@ -160,9 +200,9 @@ when the iMac's IP changes between networks. Users can override it in Settings
 ## When you move the iMac to school
 
 1. Put it on the school network (Wi-Fi or Ethernet).
-2. Update the CUPS queue if the printer IP changed:
+2. Update the CUPS queue if the printer IP changed, retaining its Fujifilm PPD:
    ```bash
-   sudo lpadmin -p bw -v ipp://NEW_PRINTER_IP/ipp/print -m everywhere -E
+   lpadmin -p bw -v lpd://NEW_PRINTER_IP/sjbw
    ```
 3. Confirm `imac.local` resolves from an iPad; if not, set the server URL in the
    app's Settings to the iMac's school IP (and ask for a DHCP reservation).
@@ -192,32 +232,27 @@ when the iMac's IP changes between networks. Users can override it in Settings
 ## Known limitations
 
 - Plain HTTP only. Add TLS before relying on this for real student data.
-- **iOS only.** Windows, Android and Chromebook users are not served, despite
-  that being the original goal. There is also no app-distribution story: an
-  unsigned build expires after 7 days and needs a Mac + Xcode per device.
+- The legacy upload app is iOS only. Native IPP is intended to cover Windows,
+  Android and ChromeOS once device and network acceptance tests pass.
 - Pages, Numbers and Keynote are rejected (415) with a message asking for a PDF
   export — nothing scripts them, and the export is two clicks in the app.
-- The printer is only reachable from the school subnet, so end-to-end printing
-  is testable only once the iMac is at school.
+- School network rules and physical output still need testing with student
+  devices before the relay can be retired.
 
-## Open item: is the `bw` queue raw?
+## Check the `bw` driver
 
-If `bw` was created without a PPD/driver, CUPS passes files through untouched
-and **silently ignores** page ranges, duplex, paper size, orientation and
-scaling — meaning the whole print-options UI would control nothing.
+The known working queue uses `FF Print Driver for Mac OS X v2.3`, not a raw
+queue. CUPS reports A4, duplex, copies, and color/monochrome capabilities when
+that PPD and filter are installed correctly.
 
 ```bash
 curl -s http://localhost:8000/health | python3 -m json.tool   # queue_is_raw
 lpoptions -p bw -l        # empty output ⇒ raw queue
 ```
 
-If it is raw, re-point the queue at the printer's IPP endpoint so CUPS applies
-its filters (and reports real job status instead of "handed to the printer"):
-
-```bash
-sudo lpadmin -p bw -v ipp://10.2.20.170/ipp/print -m everywhere -E
-lpoptions -p bw -l        # should now list real options
-```
+If `lpoptions -p bw -l` is empty or `lpstat -p bw` reports an insecure filter,
+install the Fujifilm driver before enabling sharing. The printer's
+`/ipp/print` endpoint does not work on this device.
 
 ## Tests
 

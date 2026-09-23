@@ -19,7 +19,7 @@
 #   python3 >= 3.11               # set PYTHON=/path/to/python3 if it is not on PATH
 #   Microsoft Word/Excel/PowerPoint, opened and signed in once at the machine
 #     (an unactivated Word hangs in its setup wizard instead of converting)
-#   a CUPS queue named "bw"       # lpadmin -p bw -v ipp://<printer>/ipp/print -m everywhere -E
+#   a CUPS queue named "bw"       # see enable-native-printing-macos.sh
 #
 # INSTALL_DIR defaults to ~/school-printer, which needs no sudo -- the service
 # binds an unprivileged port and keeps all its state in one directory. Point it
@@ -99,14 +99,12 @@ fi
 QUEUE="${SP_CUPS_QUEUE:-bw}"
 HAVE_QUEUE=1
 if ! lpstat -p "$QUEUE" >/dev/null 2>&1; then
-  # Not fatal. `lpadmin -m everywhere` has to talk to the printer to fetch its
-  # capabilities, so the queue cannot be created until this machine is on the
-  # same network as it. Everything up to the final lp call still works, and
+  # Not fatal. The Fujifilm PPD and filter must be installed before this queue
+  # can process jobs. Everything up to the final lp call still works, and
   # /health reports the queue state.
   HAVE_QUEUE=0
   echo "WARNING: no CUPS queue named '$QUEUE' — print jobs will fail until it exists." >&2
-  echo "         Once the printer is reachable:" >&2
-  echo "           lpadmin -p $QUEUE -v ipp://<printer-ip>/ipp/print -m everywhere -E" >&2
+  echo "         Install and share it with deploy/enable-native-printing-macos.sh." >&2
 else
   echo "queue '$QUEUE' is present"
 fi
