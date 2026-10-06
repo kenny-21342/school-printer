@@ -13,7 +13,9 @@
 #
 # Students' printers (installed from a profile) work whenever the service runs.
 # Only the open printer is a switch: it is off unless you turn it on.
-IMAC=${SCHOOL_PRINT_HOST:-imac.local}
+# imac.local is Bonjour, which does not cross subnets; away from the iMac's own
+# network fall back to its address (change it if the iMac's address changes).
+IMAC=${SCHOOL_PRINT_HOST:-$(ping -c1 -t2 imac.local >/dev/null 2>&1 && echo imac.local || echo kenny_lhs@10.2.187.53)}
 LABEL=com.school.airprint
 SHIM='$HOME/school-printer/airprint-shim'
 run() { ssh -o BatchMode=yes -o ConnectTimeout=6 "$IMAC" "$@"; }
