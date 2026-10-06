@@ -1,0 +1,65 @@
+#!/bin/bash
+# Run on YOUR Mac. Controls the iMac's AirPrint service over ssh.
+#
+#   school-print status                 service, open printer, pending requests
+#   school-print requests               pending student requests
+#   school-print list                   every request and its state
+#   school-print approve <id>           approve a request (see `requests` for the id)
+#   school-print revoke <id>            cut off one device
+#   school-print on | off               the open "School Print" printer anyone on the
+#                                       Wi-Fi can see; prints as the `owner` account
+#   school-print owner [school-id]      show / set that account
+#   school-print stop | start           the whole service, including every student's printer
+#
+# Students' printers (installed from a profile) work whenever the service runs.
+# Only the open printer is a switch: it is off unless you turn it on.
+IMAC=${SCHOOL_PRINT_HOST:-imac.local}
+LABEL=com.school.airprint
+SHIM='$HOME/school-printer/airprint-shim'
+run() { ssh -o BatchMode=yes -o ConnectTimeout=6 "$IMAC" "$@"; }
+cli() {
+  run "cd \$HOME/school-printer/server && SP_BASE_DIR=\$HOME/school-printer SP_DATA_DIR=\$HOME/school-printer/data SP_SPOOL_DIR=\$HOME/school-printer/spool SP_DB_PATH=\$HOME/school-printer/data/printers.db ../venv/bin/python -m app.airprint_cli $*"
+}
+service_up() { run "launchctl print gui/\$(id -u)/$LABEL >/dev/null 2>&1 && echo up || echo down" 2>/dev/null || echo unreachable; }
+
+wait_ready() {
+  run "for _ in \$(seq 1 30); do ipptool -q ipp://localhost:8631/ipp/print /usr/share/cups/ipptool/get-printer-attributes.test >/dev/null 2>&1 && break; sleep 1; done" >/dev/null 2>&1
+}
+start_service() {
+  run "launchctl enable gui/\$(id -u)/$LABEL; launchctl bootstrap gui/\$(id -u) \$HOME/Library/LaunchAgents/$LABEL.plist 2>/dev/null; launchctl kickstart gui/\$(id -u)/$LABEL" >/dev/null 2>&1
+  wait_ready
+}
+
+show_status() {
+  local s; s=$(service_up)
+  if [[ $s == unreachable ]]; then echo "iMac unreachable"; exit 1; fi
+  local open owner pend
+  open=$(run "test -f $SHIM/bonjour.on && echo ON || echo OFF")
+  owner=$(run "cat $SHIM/owner 2>/dev/null")
+  pend=$(cli list pending | tail -n +2 | grep -c . || true)
+  echo "Service: $([[ $s == up ]] && echo RUNNING || echo STOPPED) | Open printer: $open (as ${owner:-nobody}) | Pending requests: $pend"
+}
+
+case ${1:-status} in
+  status) ;;
+  requests) cli list pending; exit ;;
+  list) cli list; exit ;;
+  approve|revoke)
+    [[ ${2:-} =~ ^[0-9]+$ ]] || { echo "usage: school-print $1 <id>"; exit 2; }
+    cli "$1" "$2"; exit ;;
+  on)
+    [[ $(service_up) == up ]] || start_service
+    run "touch $SHIM/bonjour.on"; sleep 4 ;;
+  off) run "rm -f $SHIM/bonjour.on"; sleep 3 ;;
+  start) start_service ;;
+  stop)
+    run "launchctl bootout gui/\$(id -u)/$LABEL 2>/dev/null; launchctl disable gui/\$(id -u)/$LABEL" >/dev/null 2>&1; sleep 2 ;;
+  owner)
+    if [[ -n ${2:-} ]]; then
+      [[ $2 =~ ^[A-Za-z0-9._-]{2,64}$ ]] || { echo "invalid account name"; exit 1; }
+      run "echo '$2' > $SHIM/owner"
+    fi
+    echo "Open printer prints as: $(run "cat $SHIM/owner" 2>/dev/null)"; exit 0 ;;
+  *) sed -n 2,16p "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
+show_status

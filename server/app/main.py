@@ -32,11 +32,12 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, RedirectResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from . import __version__
+from . import __version__, airprint
 from .auth import (
     burn_password_time,
     bump_token_version,
@@ -54,7 +55,7 @@ from .auth import (
 from .config import settings
 from .cups import PrintSettings, get_job_state, queue_options, submit_job
 from .db import get_conn, init_db, startup_lock
-from .deps import admin_only, current_user
+from .deps import admin_only, current_user, print_user
 from .office import ConversionError, convert_to_pdf, office_status
 from .filetypes import can_convert, needs_conversion, office_extension_for_mime
 from .schemas import (
@@ -268,6 +269,7 @@ def convert_and_submit(job: dict) -> None:
             str(pdf_path),
             settings_obj=_print_settings_from_row(job),
             job_title=f"{job['username']}: {job['filename']}",
+            owner=job["username"],
         )
     except Exception as e:  # noqa: BLE001
         log.exception("lp submit failed for converted job %s", job_id)
@@ -501,7 +503,7 @@ def create_app() -> FastAPI:
     @limiter.limit("120/minute")
     def upload_and_print(
         request: Request,
-        user: Annotated[dict, Depends(current_user)],
+        user: Annotated[dict, Depends(print_user)],
         file: UploadFile = File(..., description="File to print"),
         copies: int = Form(1),
         duplex: bool = Form(False),
@@ -583,6 +585,7 @@ def create_app() -> FastAPI:
                     str(spool_path),
                     settings_obj=ps,
                     job_title=f"{user['username']}: {file.filename or 'doc'}",
+                    owner=user["username"],
                 )
                 job_status = "pending"
                 err = None
@@ -682,6 +685,62 @@ def create_app() -> FastAPI:
             conn.execute("UPDATE jobs SET status='cancelled' WHERE id=?", (job_id,))
         _release_spool(job_id)
         return Response(status_code=204)
+
+    # ---------------- AirPrint registry ----------------
+    # Students request a printer for their school ID; an administrator approves
+    # (python -m app.airprint_cli). See airprint.py for what a token is.
+    def _public_host(request: Request) -> str:
+        return settings.airprint_host or (request.url.hostname or "")
+
+    @app.get("/register", response_class=HTMLResponse, tags=["airprint"])
+    def register_form() -> str:
+        return airprint.register_page()
+
+    @app.post("/register", tags=["airprint"])
+    @limiter.limit("10/hour")
+    def register_submit(
+        request: Request,
+        school_id: str = Form(""),
+        name: str = Form(""),
+    ):
+        school_id = school_id.strip()
+        if not airprint.SCHOOL_ID_RE.fullmatch(school_id):
+            return HTMLResponse(
+                airprint.register_page("School ID: 2-64 letters, digits, dot, dash or underscore."),
+                status_code=422)
+        try:
+            code = airprint.request_access(school_id, name)
+        except airprint.TooManyRequests:
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                                "too many pending requests; try again later")
+        return RedirectResponse(f"/register/{code}", status_code=303)
+
+    @app.get("/register/{code}", response_class=HTMLResponse, tags=["airprint"])
+    def register_status(code: str, request: Request) -> str:
+        row = airprint.find_by_code(code)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown request")
+        return airprint.status_page(row, code, _public_host(request))
+
+    @app.get("/register/{code}/profile.mobileconfig", tags=["airprint"])
+    def register_profile(code: str, request: Request) -> Response:
+        row = airprint.find_by_code(code)
+        if row is None or row["status"] != "approved":
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no profile for this request")
+        return Response(
+            airprint.build_profile(row, _public_host(request), settings.airprint_port),
+            media_type="application/x-apple-aspen-config",
+            headers={"Content-Disposition": 'attachment; filename="school-print.mobileconfig"'})
+
+    @app.get("/airprint/resolve/{token}", tags=["airprint"], include_in_schema=False)
+    def airprint_resolve(token: str, request: Request) -> dict:
+        """Used by the AirPrint shim on this machine; refuses everyone else."""
+        if (request.client.host if request.client else "") not in ("127.0.0.1", "::1"):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "local use only")
+        row = airprint.resolve_token(token)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown or revoked key")
+        return {"school_id": row["school_id"], "user_id": row["user_id"]}
 
     # ---------------- Misc ----------------
     @app.get("/health", response_model=HealthResponse, tags=["system"])

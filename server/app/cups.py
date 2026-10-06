@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -17,6 +18,9 @@ class CupsJob:
     queue: str
     state: str  # pending, processing, done, cancelled, error
     raw: str
+
+
+_OWNER_RE = re.compile(r"[A-Za-z0-9._-]{2,64}")
 
 
 def _lp() -> str:
@@ -79,6 +83,7 @@ def submit_job(
     *,
     settings_obj: "PrintSettings | None" = None,
     job_title: str = "School Print",
+    owner: str | None = None,
 ) -> tuple[int, str]:
     """Submit a file to the CUPS queue.
 
@@ -86,8 +91,14 @@ def submit_job(
     """
     ps = settings_obj or PrintSettings()
     lp = _lp()
-    args = [
-        lp,
+    args = [lp]
+    if owner:
+        # The campus system matches the job to a school account by this name.
+        # Over the local socket CUPS would record the macOS account instead.
+        if not _OWNER_RE.fullmatch(owner):
+            raise RuntimeError(f"refusing to submit as {owner!r}")
+        args += ["-h", settings.cups_server, "-U", owner]
+    args += [
         "-d", settings.cups_queue,
         "-n", str(max(1, ps.copies)),
         "-t", job_title[:200],

@@ -1,12 +1,62 @@
-# School Printer
+# School Print
 
-The iMac's CUPS `bw` queue uses the Fujifilm driver and sends jobs to the
-campus print cluster at `lpd://10.2.20.170/sjbw`. The immediate goal is a
-personal-use pilot: print to `ipp://imac.local:631/printers/bw` from a device's
-Print dialog, then log in at a campus printer to select and release the job.
-The legacy iOS app and upload relay remain installed during the pilot.
+Print from a phone or iPad's normal Share → Print menu to the school's campus
+printers, and release the job at the printer with your own school login.
 
-## Native IPP rollout
+```
+iPad ──AirPrint (IPP)──> iMac: School Print service (:8631) ──> CUPS `bw` ──LPD──> campus Follow-Me
+                          │  token in the URL decides who you are
+                          └─ relay (:8000): registry, /register, legacy app API
+```
+
+CUPS on the iMac (macOS 12) cannot publish the `URF` Bonjour key iOS requires, so
+a small service, `deploy/airprint-shim/`, fronts it: `ippeveprinter` (ships with
+CUPS) behind a Python proxy. The campus system trusts whatever user name arrives
+with a job, and iOS always reports `mobile`, so **the proxy decides the name**.
+
+## Per-student printers
+
+1. A student opens `http://<imac>:8000/register`, enters their school ID and name.
+2. You run `tools/school-print requests`, check it really is that person, then
+   `tools/school-print approve <id>`.
+3. The student reopens their page and installs the profile (Settings → Profile
+   Downloaded). **School Print** now appears in Share → Print, and everything they
+   print is released under their school ID. No mDNS is involved: the profile adds
+   the printer by address, so it also works where Bonjour discovery is blocked.
+4. iPads that cannot install profiles use the Shortcut in `docs/print-shortcut.md`
+   with the key shown on the same page.
+
+`tools/school-print revoke <id>` cuts off one device; its jobs are refused within
+about 20 seconds. Students are `users` rows in the relay's database (the school ID
+is the username); a token is an HMAC of the request row, so nothing secret is
+stored and approving the same request twice returns the same token.
+
+**This is consent-based, not secure identity.** Nothing proves a student owns the
+school ID they type; your check at approval time is the whole safeguard, and the
+campus system does not authenticate the name. Tell students their jobs count
+against their own account. Tokens travel over plain HTTP on the school Wi-Fi.
+
+### The open printer
+
+`tools/school-print on|off` registers an additional "School Print" printer over
+Bonjour that anyone on the network can see; it prints as the `owner` account
+(`tools/school-print owner <id>`). It is off unless you turn it on.
+`School Print.app` (Desktop) wraps these commands.
+
+### Service
+
+```bash
+./deploy/install-airprint-shim-macos.sh            # on the iMac; --uninstall removes it
+tools/school-print status | stop | start
+tail -f ~/school-printer/logs/airprint-shim.log     # one line per job: who, what
+```
+
+Per-token rate limit: `SHIM_JOBS_PER_HOUR` (default 30). The relay needs
+`SP_AIRPRINT_HOST` only if the address students reached `/register` on is not the
+one to put in profiles. The iMac needs a stable address (DHCP reservation): the
+profile contains it.
+
+## Native IPP rollout (the underlying queue)
 
 The printer's advertised `/ipp/print` endpoint returns
 `client-error-not-found`. Keep the Fujifilm PPD and LPD URI; CUPS exposes that

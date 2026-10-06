@@ -62,6 +62,25 @@ CREATE TABLE IF NOT EXISTS jobs (
 )
 """
 
+# One row per device a student asks to connect. The row is the whole lifecycle:
+# pending -> approved (a token exists, derived from the row; see airprint.py)
+# -> revoked. user_id is filled when the request is approved.
+_PRINT_KEYS_TABLE = """
+CREATE TABLE IF NOT EXISTS print_keys (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    school_id    TEXT NOT NULL COLLATE NOCASE,
+    display_name TEXT,
+    code_hash    TEXT UNIQUE NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    rotation     INTEGER NOT NULL DEFAULT 0,
+    user_id      INTEGER,
+    created_at   INTEGER NOT NULL,
+    approved_at  INTEGER,
+    last_used    INTEGER,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+)
+"""
+
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)",
@@ -94,6 +113,7 @@ def init_db() -> None:
     with get_conn() as conn:
         conn.execute(_USERS_TABLE)
         conn.execute(_JOBS_TABLE)
+        conn.execute(_PRINT_KEYS_TABLE)
         for stmt in _INDEXES:
             conn.execute(stmt)
         _migrate(conn)

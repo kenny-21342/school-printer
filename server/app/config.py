@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     cups_queue: str = "bw"
     # Override the lp binary path (for tests). Empty = auto-discover.
     lp_binary: str = ""
+    # CUPS server that `lp` submits to. A TCP address, not the local socket:
+    # CUPS only honours `lp -U <name>` on a network connection, and the campus
+    # Follow-Me system lists jobs by that name.
+    cups_server: str = "localhost:631"
     # Max upload size in MB. Keep in sync with deploy/env.example.
     max_upload_mb: int = 50
     # Max scaling percentage accepted for the `scaling` print option.
@@ -66,6 +70,12 @@ class Settings(BaseSettings):
     # A claim older than this is treated as abandoned (the process crashed
     # mid-conversion) and the job is picked up again.
     conversion_claim_stale_s: int = 600
+
+    # --- AirPrint registry (airprint.py) ---
+    # Address students' profiles point at. Empty = the host they used to reach
+    # /register, which is the one address they already know works.
+    airprint_host: str = ""
+    airprint_port: int = 8631
 
     # --- spool retention ---
     # Delete spool files this many hours after their job reaches a terminal

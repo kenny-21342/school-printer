@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AirPrint front end for the iMac's bw queue. Template: @INSTALL_DIR@ is
+  substituted by install-airprint-shim-macos.sh.
+
+  CUPS on macOS 12 will not publish the URF key iOS requires before it lists a
+  printer, so /usr/bin/ippeveprinter (shipped with CUPS) advertises a second
+  printer, "School Print", with the right Bonjour record and passes each PDF to
+  the existing bw queue through print-job.sh. shim.py supervises ippeveprinter
+  (private port 8632), a de-chunking proxy on 8631 that works around a
+  Create-Job race in CUPS 2.3.4, and the dns-sd registration. A LaunchAgent
+  like the relay: it runs while the iMac is logged in. Rollback is
+  `install-airprint-shim-macos.sh --uninstall`; bw itself is untouched.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.school.airprint</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@INSTALL_DIR@/venv/bin/python</string>
+        <string>@INSTALL_DIR@/airprint-shim/shim.py</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>StandardOutPath</key>
+    <string>@INSTALL_DIR@/logs/airprint-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>@INSTALL_DIR@/logs/airprint-stderr.log</string>
+</dict>
+</plist>
