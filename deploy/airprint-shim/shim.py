@@ -18,8 +18,9 @@ whatever name arrives with a job, so this proxy decides the name:
   - /ipp/print/<token>  a student's printer. The token is resolved by the relay
     (it owns the registry; see server/app/airprint.py) to a school ID, which
     replaces requesting-user-name before ippeveprinter sees the request.
-  - /ipp/print          the open printer, advertised over Bonjour. Jobs go out
-    as the school ID in the `owner` file next to this script, or are refused.
+  - /ipp/print          the open printer, advertised over Bonjour. Only while
+    `bonjour.on` exists, and then jobs go out as the school ID in the `owner`
+    file next to this script; otherwise it is refused.
 Anything else is a 404, so ippeveprinter's own pages are never exposed. The
 backend listens on loopback only; if it did not, anyone could skip this proxy
 and choose their own name.
@@ -77,6 +78,13 @@ def resolve(token: str) -> str | None:
 
 
 def open_owner() -> str | None:
+    """The account the open printer prints as, only while it is switched on.
+
+    `off` must mean off: without this check the path stays reachable by address
+    (a profile, or "Add Printer" by IP) after the Bonjour entry is withdrawn.
+    """
+    if not os.path.exists(os.path.join(HERE, "bonjour.on")):
+        return None
     try:
         with open(os.path.join(HERE, "owner")) as fh:
             return fh.read().strip() or None
