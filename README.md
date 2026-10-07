@@ -58,6 +58,15 @@ profile contains it.
 
 ## Native IPP rollout (the underlying queue)
 
+> **Sharing is now off.** On 7 Oct a device sent a job to the shared `bw @ iMac`
+> queue under the name `lucaslu`, which its owner says he did not print. The
+> shared queue has no way to tell who is who, so it was unshared
+> (`lpadmin -p bw -o printer-is-shared=false`, `cupsctl --no-share-printers`; the
+> prior config is in `~/school-printer-backups/unshare-*`). The relay and shim
+> still submit over `localhost:631`. Do not re-run
+> `deploy/enable-native-printing-macos.sh` without wanting that route back; it
+> turns sharing on again. The notes below describe how the queue was built.
+
 The printer's advertised `/ipp/print` endpoint returns
 `client-error-not-found`. Keep the Fujifilm PPD and LPD URI; CUPS exposes that
 same queue to clients over IPP. Do not create a second destination.

@@ -4,7 +4,8 @@
 #   school-print status                 service, open printer, pending requests
 #   school-print requests               pending student requests
 #   school-print list                   every request and its state
-#   school-print approve <id>           approve a request (see `requests` for the id)
+#   school-print approve <id>           approve a request (see `requests` for the id) and
+#                                       sign its Shortcut; `shortcut <id>` retries the signing
 #   school-print revoke <id>            cut off one device
 #   school-print on | off               the open "School Print" printer anyone on the
 #                                       Wi-Fi can see; prints as the `owner` account
@@ -42,13 +43,38 @@ show_status() {
   echo "Service: $([[ $s == up ]] && echo RUNNING || echo STOPPED) | Open printer: $open (as ${owner:-nobody}) | Pending requests: $pend"
 }
 
+# Signing a Shortcut uploads it to iCloud, which fails from the iMac's network, so
+# it is signed here and the result stored on the iMac for the relay to serve.
+make_shortcut() {
+  local id=$1 d url n
+  d=$(mktemp -d) || return 1
+  url="http://$(run 'ipconfig getifaddr en1' | tr -d '[:space:]'):8000/print"
+  cli unsigned "$id" "$url" > "$d/in.shortcut" 2>/dev/null || { echo "could not export shortcut"; rm -rf "$d"; return 1; }
+  for n in 1 2 3; do
+    if shortcuts sign --mode anyone --input "$d/in.shortcut" --output "$d/out.shortcut" >/dev/null 2>&1; then
+      run 'mkdir -p $HOME/school-printer/data/shortcuts' && \
+        scp -q -o BatchMode=yes "$d/out.shortcut" "$IMAC:school-printer/data/shortcuts/$id.shortcut" && \
+        echo "Shortcut signed and stored for request $id" && rm -rf "$d" && return 0
+    fi
+    sleep 2
+  done
+  echo "Shortcut NOT signed (iCloud unreachable?). The profile still works; retry: school-print shortcut $id"
+  rm -rf "$d"; return 1
+}
+
 case ${1:-status} in
   status) ;;
   requests) cli list pending; exit ;;
   list) cli list; exit ;;
-  approve|revoke)
-    [[ ${2:-} =~ ^[0-9]+$ ]] || { echo "usage: school-print $1 <id>"; exit 2; }
-    cli "$1" "$2"; exit ;;
+  approve)
+    [[ ${2:-} =~ ^[0-9]+$ ]] || { echo "usage: school-print approve <id>"; exit 2; }
+    cli approve "$2" && make_shortcut "$2"; exit ;;
+  shortcut)
+    [[ ${2:-} =~ ^[0-9]+$ ]] || { echo "usage: school-print shortcut <id>"; exit 2; }
+    make_shortcut "$2"; exit ;;
+  revoke)
+    [[ ${2:-} =~ ^[0-9]+$ ]] || { echo "usage: school-print revoke <id>"; exit 2; }
+    cli revoke "$2"; exit ;;
   on)
     [[ $(service_up) == up ]] || start_service
     run "touch $SHIM/bonjour.on"; sleep 4 ;;
