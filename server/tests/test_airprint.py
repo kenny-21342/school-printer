@@ -139,3 +139,96 @@ def test_pending_requests_are_capped(client, env):
         airprint.request_access(f"s{i:05d}", "x")
     r = client.post("/register", data={"school_id": "s99999", "name": "x"}, follow_redirects=False)
     assert r.status_code == 429
+
+
+# ---------------------------------------------------------------- Shortcut
+
+FAKE_SIGNER = """#!/usr/bin/env bash
+# stands in for `shortcuts sign --mode anyone --input X --output Y`
+while [ $# -gt 0 ]; do case "$1" in --input) i="$2";; --output) o="$2";; esac; shift; done
+printf 'AEA1' > "$o"; cat "$i" >> "$o"
+"""
+
+
+@pytest.fixture()
+def signer(env, monkeypatch):
+    import stat
+    fake = env.tmp_path / "fake_shortcuts"
+    fake.write_text(FAKE_SIGNER)
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    from app.config import settings
+    monkeypatch.setattr(settings, "shortcuts_binary", str(fake))
+    return fake
+
+
+def _unwrap(content):
+    assert content[:4] == b"AEA1"
+    return plistlib.loads(content[4:])
+
+
+def test_shortcut_has_the_students_key_url_and_a_file_field(client, env, signer):
+    path = _register(client)
+    _id, token = _approve(env)
+    r = client.get(path + "/print.shortcut")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/vnd.apple.shortcut")
+    wf = _unwrap(r.content)
+    assert "ActionExtension" in wf["WFWorkflowTypes"]               # appears in the Share Sheet
+    action = wf["WFWorkflowActions"][0]
+    assert action["WFWorkflowActionIdentifier"] == "is.workflow.actions.downloadurl"
+    p = action["WFWorkflowActionParameters"]
+    assert p["WFURL"] == "http://testserver/print"
+    assert p["WFHTTPMethod"] == "POST" and p["WFHTTPBodyType"] == "Form"
+    header = p["WFHTTPHeaders"]["Value"]["WFDictionaryFieldValueItems"][0]
+    assert header["WFKey"]["Value"]["string"] == "X-Print-Key"
+    assert header["WFValue"]["Value"]["string"] == token
+    form = p["WFFormValues"]["Value"]["WFDictionaryFieldValueItems"][0]
+    assert form["WFKey"]["Value"]["string"] == "file"
+    assert form["WFValue"]["Value"]["Value"]["Type"] == "ExtensionInput"      # the shared file
+
+
+def test_shortcut_reads_the_upload_reply_not_its_own_input(client, env, signer):
+    path = _register(client)
+    _approve(env)
+    acts = _unwrap(client.get(path + "/print.shortcut").content)["WFWorkflowActions"]
+    upload_uuid = acts[0]["WFWorkflowActionParameters"]["UUID"]
+    ref = acts[1]["WFWorkflowActionParameters"]["WFInput"]["Value"]
+    assert ref["OutputUUID"] == upload_uuid
+
+
+def test_shortcut_is_unavailable_until_approved_and_when_signing_fails(client, env, signer):
+    path = _register(client)
+    assert client.get(path + "/print.shortcut").status_code == 404
+    _approve(env)
+    signer.write_text("#!/usr/bin/env bash\nexit 1\n")
+    assert client.get(path + "/print.shortcut").status_code == 503
+
+
+def test_approved_page_offers_the_shortcut(client, env):
+    path = _register(client)
+    _approve(env)
+    assert "print.shortcut" in client.get(path).text
+
+
+def test_a_presigned_shortcut_is_served_even_if_signing_is_unavailable(client, env, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "shortcuts_binary", str(env.tmp_path / "missing"))
+    path = _register(client)
+    req_id, _token = _approve(env)
+    assert client.get(path + "/print.shortcut").status_code == 503          # nothing stored yet
+    d = settings.data_dir / "shortcuts"
+    d.mkdir(exist_ok=True)
+    (d / f"{req_id}.shortcut").write_bytes(b"AEA1-presigned")
+    r = client.get(path + "/print.shortcut")
+    assert r.status_code == 200 and r.content == b"AEA1-presigned"
+
+
+def test_cli_emits_the_unsigned_shortcut_for_signing_on_another_machine(client, env, capsysbinary):
+    from app import airprint_cli
+    _register(client)
+    req_id, token = _approve(env)
+    assert airprint_cli.main(["unsigned", str(req_id), "http://10.2.187.53:8000/print"]) == 0
+    wf = plistlib.loads(capsysbinary.readouterr().out)
+    p = wf["WFWorkflowActions"][0]["WFWorkflowActionParameters"]
+    assert p["WFURL"] == "http://10.2.187.53:8000/print"
+    assert p["WFHTTPHeaders"]["Value"]["WFDictionaryFieldValueItems"][0]["WFValue"]["Value"]["string"] == token

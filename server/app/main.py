@@ -37,7 +37,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from . import __version__, airprint
+from . import __version__, airprint, shortcut
 from .auth import (
     burn_password_time,
     bump_token_version,
@@ -731,6 +731,21 @@ def create_app() -> FastAPI:
             airprint.build_profile(row, _public_host(request), settings.airprint_port),
             media_type="application/x-apple-aspen-config",
             headers={"Content-Disposition": 'attachment; filename="school-print.mobileconfig"'})
+
+    @app.get("/register/{code}/print.shortcut", tags=["airprint"])
+    def register_shortcut(code: str, request: Request) -> Response:
+        row = airprint.find_by_code(code)
+        if row is None or row["status"] != "approved":
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no shortcut for this request")
+        try:
+            data = shortcut.signed_shortcut(
+                airprint.token_for(row), f"http://{request.url.netloc}/print", row["id"])
+        except shortcut.SigningUnavailable as e:
+            log.warning("cannot sign shortcut: %s", e)
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                                "the Shortcut cannot be made right now; install the printer profile instead")
+        return Response(data, media_type="application/vnd.apple.shortcut",
+                        headers={"Content-Disposition": 'attachment; filename="Print at School.shortcut"'})
 
     @app.get("/airprint/resolve/{token}", tags=["airprint"], include_in_schema=False)
     def airprint_resolve(token: str, request: Request) -> dict:

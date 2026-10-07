@@ -3,6 +3,7 @@
     python -m app.airprint_cli list [pending|approved|revoked]
     python -m app.airprint_cli approve <id>
     python -m app.airprint_cli revoke <id>
+    python -m app.airprint_cli unsigned <id> <print-url>   # Shortcut plist on stdout, to be signed elsewhere
 
 Works on the database directly, so approving needs no admin password. Run it
 with the relay's environment (see tools/school-print, which does that over ssh).
@@ -42,6 +43,15 @@ def main(argv: list[str]) -> int:
         except (KeyError, ValueError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
+        return 0
+    if cmd == "unsigned" and len(argv) == 3 and argv[1].isdigit():
+        from . import shortcut
+        row = next((r for r in airprint.list_requests("approved") if r["id"] == int(argv[1])), None)
+        if row is None:
+            print("error: no approved request with that id", file=sys.stderr)
+            return 1
+        sys.stdout.buffer.write(shortcut.build_shortcut(airprint.token_for(row), argv[2]))
+        sys.stdout.buffer.flush()
         return 0
     print(__doc__, file=sys.stderr)
     return 2

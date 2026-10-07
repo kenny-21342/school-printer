@@ -221,6 +221,9 @@ Ask the administrator to approve it, then reopen this page.</p>
 “Not Signed” because it comes from this school project, not a company.</li>
 <li>In any app: <b>Share → Print → Select Printer → School Print</b>.</li></ol>
 <h2>2. Or use a Shortcut</h2>
-<p>If your iPad will not install profiles, use the Print Shortcut and paste this key when asked:</p>
+<p>If your iPad will not install profiles: add the Shortcut, then use <b>Share → Print at School</b>
+in any app. It already contains your key.</p>
+<a class="btn" href="/register/{code}/print.shortcut">Add Print Shortcut</a>
+<p class="mut">Or paste this key into a Shortcut you built yourself:</p>
 <code>{token}</code>
 <p class="mut">Keep the key private. Anyone who has it can print as {sid}.</p>""")

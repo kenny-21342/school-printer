@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     # /register, which is the one address they already know works.
     airprint_host: str = ""
     airprint_port: int = 8631
+    # `shortcuts` signs the per-student iOS Shortcut. Empty = discover on PATH.
+    shortcuts_binary: str = ""
 
     # --- spool retention ---
     # Delete spool files this many hours after their job reaches a terminal
