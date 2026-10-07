@@ -16,25 +16,34 @@ with a job, and iOS always reports `mobile`, so **the proxy decides the name**.
 
 ## Per-student printers
 
-1. A student opens `http://<imac>:8000/register`, enters their school ID and name.
-2. You run `tools/school-print requests`, check it really is that person, then
-   `tools/school-print approve <id>`.
-3. The student reopens their page and installs the profile (Settings → Profile
+1. A student opens `http://<imac>:8000/register` and enters their school ID and name.
+2. **They prove the ID is theirs.** The relay prints a one-page code under that ID at
+   the campus printer. Only the account's owner can log in there, release the job
+   ("School Print verification code") and read the code, which they type on the page.
+   The check uses the school's own login, so nothing can be impersonated. Limits: 3
+   codes per request, 5 wrong tries per code, 3 requests per ID per hour (each one
+   puts a held page in that account's queue).
+3. Once verified they are approved automatically (`SP_AIRPRINT_AUTO_APPROVE_VERIFIED=false`
+   makes you approve each one with `tools/school-print approve <id>`; `SP_AIRPRINT_VERIFY=false`
+   turns the check off and falls back to approving by hand).
+4. The student reopens their page and installs the profile (Settings → Profile
    Downloaded). **School Print** now appears in Share → Print, and everything they
    print is released under their school ID. No mDNS is involved: the profile adds
    the printer by address, so it also works where Bonjour discovery is blocked.
-4. iPads that cannot install profiles use the Shortcut in `docs/print-shortcut.md`
-   with the key shown on the same page.
+5. iPads that cannot install profiles use the Shortcut on the same page (Add Print
+   Shortcut), which already contains their key. See `docs/print-shortcut.md`.
 
 `tools/school-print revoke <id>` cuts off one device; its jobs are refused within
 about 20 seconds. Students are `users` rows in the relay's database (the school ID
 is the username); a token is an HMAC of the request row, so nothing secret is
 stored and approving the same request twice returns the same token.
 
-**This is consent-based, not secure identity.** Nothing proves a student owns the
-school ID they type; your check at approval time is the whole safeguard, and the
-campus system does not authenticate the name. Tell students their jobs count
-against their own account. Tokens travel over plain HTTP on the school Wi-Fi.
+**What the check does and does not prove.** The printed code proves the requester can
+log in as that school account at the moment they register. It does not authenticate
+later print jobs: the device's token is a bearer secret, so a stolen token prints as
+that student until you revoke it, and the campus system itself still trusts whatever
+name arrives with a job. Tokens travel over plain HTTP on the school Wi-Fi. Tell
+students their jobs count against their own account.
 
 ### The open printer
 

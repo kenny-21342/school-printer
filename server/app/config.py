@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     airprint_port: int = 8631
     # `shortcuts` signs the per-student iOS Shortcut. Empty = discover on PATH.
     shortcuts_binary: str = ""
+    # Registration proves the school ID is the requester's: a code is printed
+    # under that ID and can only be read by logging in at the campus printer.
+    airprint_verify: bool = True
+    # Approve a student as soon as they prove it, or wait for the administrator.
+    airprint_auto_approve_verified: bool = True
 
     # --- spool retention ---
     # Delete spool files this many hours after their job reaches a terminal

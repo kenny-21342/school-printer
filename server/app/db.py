@@ -77,6 +77,12 @@ CREATE TABLE IF NOT EXISTS print_keys (
     created_at   INTEGER NOT NULL,
     approved_at  INTEGER,
     last_used    INTEGER,
+    -- Proof of owning the school ID: a code printed under that ID (airprint.py).
+    verify_mac      TEXT,
+    verify_sends    INTEGER NOT NULL DEFAULT 0,
+    verify_sent_at  INTEGER,
+    verify_attempts INTEGER NOT NULL DEFAULT 0,
+    verified_at     INTEGER,
     FOREIGN KEY (user_id) REFERENCES users(id)
 )
 """
@@ -121,6 +127,12 @@ def init_db() -> None:
 
 def _migrate(conn) -> None:
     """Add columns that may be missing if the DB predates them."""
+    pk_cols = {r[1] for r in conn.execute("PRAGMA table_info(print_keys)").fetchall()}
+    for name, decl in (("verify_mac", "TEXT"), ("verify_sends", "INTEGER NOT NULL DEFAULT 0"),
+                       ("verify_sent_at", "INTEGER"), ("verify_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                       ("verified_at", "INTEGER")):
+        if name not in pk_cols:
+            conn.execute(f"ALTER TABLE print_keys ADD COLUMN {name} {decl}")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
     additions = {
         "page_range": "TEXT",

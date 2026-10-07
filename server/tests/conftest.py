@@ -65,6 +65,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("SP_SPOOL_DIR", str(spool))
     monkeypatch.setenv("SP_DB_PATH", str(data / "test.db"))
     monkeypatch.setenv("SP_LP_BINARY", str(lp))
+    # Registration tests exercise the manual-approval flow; test_airprint_verify.py
+    # switches verification on for itself.
+    monkeypatch.setenv("SP_AIRPRINT_VERIFY", "false")
     monkeypatch.setenv("SP_BOOTSTRAP_ADMIN_PASS", "adminpass123")
     monkeypatch.setenv("SP_BOOTSTRAP_ADMIN_USER", "admin")
     monkeypatch.setenv("SP_SPOOL_RETENTION_HOURS", "24")

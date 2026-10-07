@@ -30,10 +30,18 @@ from .db import get_conn
 
 SCHOOL_ID_RE = re.compile(r"[A-Za-z0-9._-]{2,64}")
 MAX_PENDING = 200
+MAX_ATTEMPTS = 5            # wrong codes before a new one must be printed
+MAX_SENDS = 3               # codes printed per request
+RESEND_DELAY_S = 60
+MAX_PER_ID_PER_HOUR = 3     # requests per school ID: each one prints a page in that account's queue
 
 
 class TooManyRequests(Exception):
     pass
+
+
+class VerificationError(Exception):
+    """The code page could not be printed (printer or CUPS unavailable)."""
 
 
 def _secret() -> bytes:
@@ -63,13 +71,102 @@ def request_access(school_id: str, display_name: str) -> str:
     with get_conn() as conn:
         pending = conn.execute(
             "SELECT COUNT(*) FROM print_keys WHERE status='pending'").fetchone()[0]
-        if pending >= MAX_PENDING:
+        recent = conn.execute(
+            "SELECT COUNT(*) FROM print_keys WHERE school_id=? AND created_at>?",
+            (school_id, int(time.time()) - 3600)).fetchone()[0]
+        if pending >= MAX_PENDING or recent >= MAX_PER_ID_PER_HOUR:
             raise TooManyRequests
         conn.execute(
             "INSERT INTO print_keys (school_id, display_name, code_hash, created_at) "
             "VALUES (?, ?, ?, ?)",
             (school_id, display_name.strip()[:80], _hash(code), int(time.time())))
     return code
+
+
+def _new_code() -> str:
+    return f"{secrets.randbelow(10**6):06d}"
+
+
+def _verify_mac(request_id: int, code: str) -> str:
+    return hmac.new(_secret(), f"verify:{request_id}:{code}".encode(), hashlib.sha256).hexdigest()
+
+
+def verification_pdf(code: str, school_id: str) -> bytes:
+    """A one-page A4 PDF carrying the code, written by hand (no PDF library)."""
+    def esc(t: str) -> str:
+        return t.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    lines = [(18, 760, "School Print - verification"),
+             (11, 730, f"Requested for school account: {esc(school_id)}"),
+             (11, 712, "Enter this code on the page you opened on your iPad:"),
+             (64, 640, code),
+             (10, 600, "If you did not ask for this, ignore it; nothing is set up until the code is entered.")]
+    stream = "BT\n" + "\n".join(
+        f"/F1 {size} Tf 1 0 0 1 72 {y} Tm ({text}) Tj" for size, y, text in lines) + "\nET"
+    body = [b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R "
+            b"/Resources << /Font << /F1 5 0 R >> >> >>",
+            b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream.encode()),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for n, obj in enumerate(body, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (n, obj)
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(body) + 1)
+    for off in offsets:
+        out += b"%010d 00000 n \n" % off
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(body) + 1, xref)
+    return bytes(out)
+
+
+def send_verification(request_id: int) -> None:
+    """Print a fresh code under the requested school ID and remember its MAC.
+
+    Only the holder of that account can log in at the campus printer, release the
+    job and read the code, so entering it proves they own the account. The older
+    code stops working. Raises TooManyRequests (limits) or VerificationError.
+    """
+    from . import cups                       # lazy: cups pulls in subprocess setup
+    row = _get(request_id)
+    now = int(time.time())
+    if row["status"] != "pending" or row["verified_at"]:
+        return
+    if row["verify_sends"] >= MAX_SENDS or (
+            row["verify_sent_at"] and now - row["verify_sent_at"] < RESEND_DELAY_S):
+        raise TooManyRequests
+    code = _new_code()
+    with get_conn() as conn:                 # count the attempt before printing, so a failure still counts
+        conn.execute(
+            "UPDATE print_keys SET verify_mac=?, verify_sends=verify_sends+1, verify_sent_at=?, "
+            "verify_attempts=0 WHERE id=?", (_verify_mac(request_id, code), now, request_id))
+    path = settings.spool_dir / f"verify-{request_id}-{secrets.token_hex(4)}.pdf"
+    try:
+        path.write_bytes(verification_pdf(code, row["school_id"]))
+        cups.submit_job(str(path), job_title="School Print verification code", owner=row["school_id"])
+    except Exception as e:  # noqa: BLE001
+        raise VerificationError(str(e)) from e
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def check_code(request_id: int, code: str) -> str:
+    """'ok' (and approve if configured), 'wrong', 'locked' (too many tries) or 'none'."""
+    row = _get(request_id)
+    if row["status"] != "pending" or not row["verify_mac"]:
+        return "none"
+    if row["verify_attempts"] >= MAX_ATTEMPTS:
+        return "locked"
+    with get_conn() as conn:
+        conn.execute("UPDATE print_keys SET verify_attempts=verify_attempts+1 WHERE id=?", (request_id,))
+    if not hmac.compare_digest(_verify_mac(request_id, code.strip()), row["verify_mac"]):
+        return "wrong"
+    with get_conn() as conn:
+        conn.execute("UPDATE print_keys SET verified_at=?, verify_mac=NULL WHERE id=?",
+                     (int(time.time()), request_id))
+    if settings.airprint_auto_approve_verified:
+        approve(request_id)
+    return "ok"
 
 
 def find_by_code(code: str) -> dict | None:
@@ -204,16 +301,41 @@ menu. An administrator approves each request.</p>
 <p class="mut">Jobs you print count against your own school account. Only request your own ID.</p>""")
 
 
-def status_page(row: dict, code: str, host: str) -> str:
+NOTICES = {
+    "send": "We could not print the code just now. Wait a minute and tap the button to try again.",
+    "resent": "A new code was printed. The earlier code no longer works.",
+    "wrong": "That code is incorrect. Check the page you released and try again.",
+    "locked": "Too many wrong codes. Print a new one with the button below.",
+    "limit": "Too many codes have been printed for this request. Ask the administrator.",
+}
+
+
+def status_page(row: dict, code: str, host: str, notice: str = "") -> str:
     sid = html.escape(row["school_id"])
+    note = (f'<p style="color:#d70015"><b>{html.escape(NOTICES[notice])}</b></p>'
+            if notice in NOTICES else "")
+    if row["status"] == "pending" and settings.airprint_verify and not row["verified_at"]:
+        return _page("Check your school account", f"""{note}
+<p>We printed a one-page <b>code</b> to the campus printer under <b>{sid}</b>.
+Only you can collect it:</p>
+<ol><li>At a campus printer, log in with your school account.</li>
+<li>Release the job called <b>School Print verification code</b>.</li>
+<li>Type the 6-digit code from the page here.</li></ol>
+<form method="post" action="/register/{code}/verify">
+<input name="code" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" required autocomplete="off"
+ placeholder="6-digit code">
+<button class="btn" type="submit">Verify</button></form>
+<form method="post" action="/register/{code}/resend" style="margin-top:1rem">
+<button class="btn" style="background:var(--card);color:var(--fg)" type="submit">Print a new code</button></form>
+<p class="mut">Not at school right now? Keep this page's address and come back; the code stays valid.</p>""")
     if row["status"] == "pending":
-        return _page("Waiting for approval", f"""<p>Your request for <b>{sid}</b> has been recorded.
+        return _page("Waiting for approval", f"""{note}<p>Your request for <b>{sid}</b> has been recorded.
 Ask the administrator to approve it, then reopen this page.</p>
 <p class="mut">Keep this page's address: it is how you will get your printer.</p>""")
     if row["status"] == "revoked":
         return _page("Access removed", f"<p>Access for <b>{sid}</b> on this device has been removed.</p>")
     token = html.escape(token_for(row))
-    return _page("Your printer is ready", f"""<p>Printing as <b>{sid}</b>.</p>
+    return _page("Your printer is ready", f"""{note}<p>Printing as <b>{sid}</b>.</p>
 <h2>1. Install the printer</h2>
 <a class="btn" href="/register/{code}/profile.mobileconfig">Download printer profile</a>
 <ol><li>Tap <b>Allow</b> when asked to download a profile.</li>

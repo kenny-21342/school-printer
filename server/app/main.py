@@ -712,15 +712,52 @@ def create_app() -> FastAPI:
             code = airprint.request_access(school_id, name)
         except airprint.TooManyRequests:
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
-                                "too many pending requests; try again later")
-        return RedirectResponse(f"/register/{code}", status_code=303)
+                                "too many requests for now; try again later")
+        notice = ""
+        if settings.airprint_verify:
+            try:
+                airprint.send_verification(airprint.find_by_code(code)["id"])
+            except (airprint.VerificationError, airprint.TooManyRequests) as e:
+                log.warning("verification page not printed for %s: %s", school_id, e)
+                notice = "?n=send"
+        return RedirectResponse(f"/register/{code}{notice}", status_code=303)
 
     @app.get("/register/{code}", response_class=HTMLResponse, tags=["airprint"])
-    def register_status(code: str, request: Request) -> str:
+    def register_status(code: str, request: Request, n: str = "") -> str:
         row = airprint.find_by_code(code)
         if row is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown request")
-        return airprint.status_page(row, code, _public_host(request))
+        return airprint.status_page(row, code, _public_host(request), n)
+
+    @app.post("/register/{code}/verify", tags=["airprint"])
+    @limiter.limit("30/hour")
+    def register_verify(request: Request, code: str, entered: str = Form("", alias="code")):
+        row = airprint.find_by_code(code)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown request")
+        result = airprint.check_code(row["id"], entered)
+        if result in ("ok", "none"):
+            return RedirectResponse(f"/register/{code}", status_code=303)
+        row = airprint.find_by_code(code)
+        notice = "locked" if result == "locked" else "wrong"
+        return HTMLResponse(airprint.status_page(row, code, _public_host(request), notice),
+                            status_code=429 if result == "locked" else 200)
+
+    @app.post("/register/{code}/resend", tags=["airprint"])
+    @limiter.limit("30/hour")
+    def register_resend(request: Request, code: str):
+        row = airprint.find_by_code(code)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown request")
+        try:
+            airprint.send_verification(row["id"])
+        except airprint.TooManyRequests:
+            return HTMLResponse(airprint.status_page(row, code, _public_host(request), "limit"),
+                                status_code=429)
+        except airprint.VerificationError as e:
+            log.warning("verification page not printed for %s: %s", row["school_id"], e)
+            return RedirectResponse(f"/register/{code}?n=send", status_code=303)
+        return RedirectResponse(f"/register/{code}?n=resent", status_code=303)
 
     @app.get("/register/{code}/profile.mobileconfig", tags=["airprint"])
     def register_profile(code: str, request: Request) -> Response:

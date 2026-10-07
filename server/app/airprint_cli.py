@@ -26,9 +26,10 @@ def main(argv: list[str]) -> int:
     cmd = argv[0] if argv else "list"
     if cmd == "list":
         rows = airprint.list_requests(argv[1] if len(argv) > 1 else None)
-        print(f"{'id':>3}  {'school id':<14} {'status':<9} {'requested':<12} {'last used':<12} name")
+        print(f"{'id':>3}  {'school id':<14} {'status':<9} {'verified':<9} {'requested':<12} {'last used':<12} name")
         for r in rows:
             print(f"{r['id']:>3}  {r['school_id']:<14} {r['status']:<9} "
+                  f"{'yes' if r['verified_at'] else '-':<9} "
                   f"{_fmt(r['created_at']):<12} {_fmt(r['last_used']):<12} {r['display_name'] or ''}")
         return 0
     if cmd in ("approve", "revoke") and len(argv) == 2 and argv[1].isdigit():
