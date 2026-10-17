@@ -1,0 +1,8 @@
+# Lets the Mac-side tool (tools/school-print) run the admin commands over ssh
+# without a password prompt. Replace YOUR_USER with the login you ssh in as, then:
+#   sudo install -m 440 deploy/linux/sudoers-school-print.example /etc/sudoers.d/school-print
+#   sudo visudo -c
+# It allows exactly one command: the script, which only does the registry and
+# service operations listed in its usage. Anyone who can ssh as that user can
+# approve or revoke students, so protect that login with an ssh key.
+YOUR_USER ALL=(root) NOPASSWD: /usr/local/bin/school-print
