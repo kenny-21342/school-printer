@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Local Linux administration; remotely: ssh <imac> school-print <command>
+set -euo pipefail
+if [[ -z ${INSTALL_DIR:-} && -f /etc/school-printer.conf ]]; then
+  # shellcheck source=/dev/null
+  source /etc/school-printer.conf
+fi
+INSTALL_DIR="${INSTALL_DIR:-/opt/school-printer}"
+case ${1:-status} in
+  status)
+    systemctl --no-pager status school-printer.service school-airprint.service || true
+    if [[ $EUID == 0 ]]; then
+      echo "Open printer: $([[ -f $INSTALL_DIR/data/airprint/bonjour.on ]] && echo ON || echo OFF)"
+      echo "Owner: $(cat "$INSTALL_DIR/data/airprint/owner" 2>/dev/null || echo unset)"
+    fi
+    curl -fsS http://127.0.0.1:8000/health; echo; exit ;;
+  logs) exec journalctl -u school-printer.service -u school-airprint.service -f ;;
+  address) # the IPv4 address students reach this machine on (no root needed)
+    ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}'
+    exit ;;
+  requests|list|approve|revoke|unsigned|store-shortcut|summary|on|off|owner|start|stop|restart) ;;
+  *) echo 'Usage: school-print status|summary|logs|address|requests|list|approve <id>|revoke <id>|unsigned <id> <print-url>|store-shortcut <id> (stdin)|on|off|owner [school-id]|start|stop|restart' >&2; exit 2 ;;
+esac
+# Re-run as root. Only this script is re-run (INSTALL_DIR comes from
+# /etc/school-printer.conf), so one sudoers line for this path is enough for
+# the Mac-side tool; see deploy/linux/sudoers-school-print.example.
+if [[ $EUID != 0 ]]; then exec sudo "$0" "$@"; fi
+STATE="$INSTALL_DIR/data/airprint"
+cli() {
+  (cd "$INSTALL_DIR" && runuser -u school-printer -- env \
+    SP_BASE_DIR="$INSTALL_DIR" SP_DATA_DIR="$INSTALL_DIR/data" \
+    SP_SPOOL_DIR="$INSTALL_DIR/spool" SP_DB_PATH="$INSTALL_DIR/data/printers.db" \
+    "$INSTALL_DIR/venv/bin/python" -m app.airprint_cli "$@")
+}
+case $1 in
+  summary) # one line, same shape the Mac-side tool and School Print.app read
+    if systemctl is-active --quiet school-airprint.service; then up=RUNNING; else up=STOPPED; fi
+    pending=$(cli list pending | tail -n +2 | grep -c . || true)
+    echo "Service: $up | Open printer: $([[ -f $STATE/bonjour.on ]] && echo ON || echo OFF) (as $(cat "$STATE/owner" 2>/dev/null || echo nobody)) | Pending requests: $pending" ;;
+  store-shortcut) # a Shortcut signed on the Mac, on stdin; the relay serves it from data/shortcuts
+    [[ ${2:-} =~ ^[0-9]+$ && $# == 2 ]] || { echo 'Usage: school-print store-shortcut <id> < signed.shortcut' >&2; exit 2; }
+    tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+    head -c 2000000 > "$tmp"
+    [[ $(head -c 4 "$tmp") == AEA1 ]] || { echo 'Not a signed Shortcut.' >&2; exit 1; }
+    install -d -m 700 -o school-printer -g school-printer "$INSTALL_DIR/data/shortcuts"
+    install -m 600 -o school-printer -g school-printer "$tmp" "$INSTALL_DIR/data/shortcuts/$2.shortcut"
+    echo "stored shortcut for request $2" ;;
+  requests) cli list pending ;;
+  list) cli list ;;
+  approve|revoke)
+    [[ ${2:-} =~ ^[0-9]+$ && $# == 2 ]] || { echo "Usage: school-print $1 <id>" >&2; exit 2; }
+    cli "$1" "$2" ;;
+  unsigned)
+    [[ ${2:-} =~ ^[0-9]+$ && $# == 3 ]] || { echo 'Usage: school-print unsigned <id> <print-url>' >&2; exit 2; }
+    cli unsigned "$2" "$3" ;;
+  on)
+    [[ -s "$STATE/owner" ]] || { echo 'Set school-print owner <school-id> first.' >&2; exit 1; }
+    runuser -u school-printer -- touch "$STATE/bonjour.on"
+    systemctl start school-printer.service school-airprint.service ;;
+  off) rm -f "$STATE/bonjour.on" ;;
+  owner)
+    if [[ -n ${2:-} ]]; then
+      [[ $2 =~ ^[A-Za-z0-9._-]{2,64}$ ]] || { echo 'Invalid school ID.' >&2; exit 2; }
+      printf '%s\n' "$2" > "$STATE/owner"
+      chown school-printer:school-printer "$STATE/owner"
+      chmod 600 "$STATE/owner"
+    fi
+    cat "$STATE/owner" ;;
+  start|restart) systemctl "$1" school-printer.service school-airprint.service ;;
+  stop) systemctl stop school-airprint.service school-printer.service ;;
+esac

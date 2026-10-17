@@ -208,6 +208,7 @@ def test_conversion_failure_surfaces_as_job_error(client, student_auth, monkeypa
 def test_cancel_during_conversion_never_prints(client, student_auth):
     job_id = _upload_docx(client, student_auth).json()["id"]
     assert client.delete(f"/jobs/{job_id}", headers=student_auth).status_code == 204
+    assert not (client.env.tmp_path / "cancel-args").exists()
 
     client.env.main.run_conversions_once()
 
@@ -356,6 +357,7 @@ def test_cancel_marks_job_and_frees_spool(client, student_auth):
     assert len(list(client.env.spool.iterdir())) == 1
 
     assert client.delete(f"/jobs/{job_id}", headers=student_auth).status_code == 204
+    assert (client.env.tmp_path / "cancel-args").read_text().splitlines() == ["bw-42"]
     assert client.get(f"/jobs/{job_id}", headers=student_auth).json()["status"] == "cancelled"
     assert list(client.env.spool.iterdir()) == []
 

@@ -1,5 +1,11 @@
 # School Print
 
+**Moving the iMac to Arch Linux + Hyprland:** follow [the Linux setup and
+migration guide](docs/linux.md). It includes a live-state backup command,
+headless LibreOffice conversion, systemd services, and Avahi AirPrint publishing.
+The macOS setup below is retained. A Linux-compatible campus printer driver is
+required; the existing macOS Fujifilm filter cannot be reused on Arch.
+
 Print from a phone or iPad's normal Share → Print menu to the school's campus
 printers, and release the job at the printer with your own school login.
 

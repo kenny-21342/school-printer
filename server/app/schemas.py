@@ -84,13 +84,10 @@ class JobOut(BaseModel):
 
 
 class OfficeStatus(BaseModel):
-    """Whether Word/Excel/PowerPoint printing will work on this host.
-
-    `gui_session` is the one that catches the confusing failure: without
-    automatic login the service comes back after a reboot in a session with no
-    GUI, PDFs keep printing, and only Office files fail.
-    """
+    """Converter availability; only the AppleScript backend needs a GUI/license."""
     enabled: bool
+    backend: str = "applescript"
+    requires_gui: bool = True
     available: bool
     gui_session: bool
     script_present: bool

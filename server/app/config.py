@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import secrets
 from pathlib import Path
+from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .filetypes import CONVERTIBLE_MIMES
@@ -17,7 +18,7 @@ class Settings(BaseSettings):
     log_level: str = "info"
 
     # --- paths ---
-    # The iMac is the only host now; these match deploy/com.school.printer.plist.
+    # Deployment scripts override these for the chosen installation directory.
     base_dir: Path = Path("/usr/local/school-printer")
     data_dir: Path = Path("/usr/local/school-printer/data")
     spool_dir: Path = Path("/usr/local/school-printer/spool")
@@ -60,7 +61,9 @@ class Settings(BaseSettings):
     # Turn off to refuse Office uploads up front (e.g. while Office is being
     # reinstalled) instead of accepting jobs that will fail one by one.
     office_conversion_enabled: bool = True
-    # Override the osascript binary (for tests). Empty = auto-discover.
+    # auto selects AppleScript on macOS and headless LibreOffice on Linux.
+    office_backend: Literal["auto", "applescript", "libreoffice"] = "auto"
+    # Override the selected converter binary (for tests). Empty = auto-discover.
     office_convert_binary: str = ""
     # Per-document ceiling. Word can take tens of seconds on a large document;
     # anything past this is a hung GUI app and the job is failed.

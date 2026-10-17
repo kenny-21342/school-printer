@@ -1,0 +1,30 @@
+[Unit]
+Description=School Print registry and upload relay
+Wants=network-online.target
+After=network-online.target cups.service
+
+[Service]
+Type=simple
+User=school-printer
+Group=school-printer
+WorkingDirectory=@INSTALL_DIR@
+EnvironmentFile=@INSTALL_DIR@/.env
+Environment=SP_BASE_DIR=@INSTALL_DIR@
+Environment=SP_DATA_DIR=@INSTALL_DIR@/data
+Environment=SP_SPOOL_DIR=@INSTALL_DIR@/spool
+Environment=SP_DB_PATH=@INSTALL_DIR@/data/printers.db
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=@INSTALL_DIR@/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@INSTALL_DIR@/data @INSTALL_DIR@/spool @INSTALL_DIR@/logs
+Environment=HOME=@INSTALL_DIR@/data
+
+[Install]
+WantedBy=multi-user.target

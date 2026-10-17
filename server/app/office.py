@@ -1,19 +1,14 @@
-"""Office -> PDF conversion, by driving Microsoft Office through AppleScript.
-
-This is the piece that used to be a two-machine protocol. The Pi held the API
-and shipped Office files to the iMac over SMB, then polled a shared outbox for
-the PDF to come back. With the API running on the iMac itself, that whole relay
-collapses into one subprocess call.
-
-Shaped like cups.py: a thin, blocking subprocess wrapper with a settings-driven
-binary override so the tests never launch Word.
-"""
+"""Office -> PDF with Microsoft Office on macOS or headless LibreOffice on Linux."""
 from __future__ import annotations
 
 import fcntl
 import logging
+import os
+import signal
 import shutil
 import subprocess
+import sys
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -58,6 +53,66 @@ def _osascript() -> str:
     return shutil.which("osascript") or "/usr/bin/osascript"
 
 
+def backend() -> str:
+    if settings.office_backend != "auto":
+        return settings.office_backend
+    return "applescript" if sys.platform == "darwin" else "libreoffice"
+
+
+def _libreoffice() -> str | None:
+    return settings.office_convert_binary or shutil.which("libreoffice") or shutil.which("soffice")
+
+
+def _convert_libreoffice(src: Path, dst: Path) -> None:
+    binary = _libreoffice()
+    if not binary:
+        raise ConversionError("LibreOffice is not installed on the print server — please export to PDF")
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    # A fresh profile avoids connecting to the user's desktop LibreOffice, and
+    # a fresh output directory prevents a stale PDF from appearing successful.
+    with tempfile.TemporaryDirectory(prefix="convert-", dir=settings.data_dir) as work:
+        profile = Path(work, "profile").resolve()
+        profile.mkdir()
+        (profile / "user").mkdir()
+        (profile / "user" / "registrymodifications.xcu").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<oor:items xmlns:oor="http://openoffice.org/2001/registry">'
+            '<item oor:path="/org.openoffice.Office.Common/Security/Scripting">'
+            '<prop oor:name="MacroSecurityLevel" oor:op="fuse"><value>3</value></prop>'
+            '</item></oor:items>'
+        )
+        outdir = Path(work, "output")
+        outdir.mkdir()
+        args = [binary, f"-env:UserInstallation={profile.as_uri()}", "--headless",
+                "--nologo", "--nodefault", "--norestore", "--convert-to", "pdf",
+                "--outdir", str(outdir), str(src.resolve())]
+        # LibreOffice launches child processes. Kill the entire conversion on
+        # timeout so an abandoned child cannot keep consuming resources.
+        try:
+            with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True, start_new_session=True,
+                                  env={**os.environ, "SAL_USE_VCLPLUGIN": "svp"}) as proc:
+                try:
+                    stdout, stderr = proc.communicate(timeout=settings.office_convert_timeout_s)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate()
+                    raise ConversionError("converting this document took too long — please export it to PDF") from None
+        except OSError as e:
+            raise ConversionError(f"the document converter could not run: {e}") from e
+        output = (stdout + stderr).strip()
+        generated = outdir / f"{src.stem}.pdf"
+        if proc.returncode != 0:
+            raise ConversionError(f"LibreOffice could not convert this document ({output[-200:] or 'unknown error'})")
+        if not generated.is_file() or generated.stat().st_size == 0:
+            raise ConversionError("the converter produced no PDF — please export the document to PDF and print that instead")
+        with generated.open("rb") as fh:
+            if not fh.read(5).startswith(b"%PDF-"):
+                raise ConversionError("the converter produced an invalid PDF — please export the document to PDF")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(generated), dst)
+
+
 @contextmanager
 def _conversion_lock() -> Iterator[None]:
     """Serialize conversions across every uvicorn worker process.
@@ -85,10 +140,18 @@ def convert_to_pdf(src: str | Path, dst: str | Path) -> None:
     src = Path(src)
     dst = Path(dst)
 
-    if not SCRIPT.exists():
-        raise ConversionError("the document converter is not installed on the server")
     if not src.exists():
         raise ConversionError("the uploaded file is no longer on the server")
+    if backend() == "libreoffice":
+        with _conversion_lock():
+            try:
+                _convert_libreoffice(src, dst)
+            except ConversionError:
+                _discard(dst)
+                raise
+        return
+    if not SCRIPT.exists():
+        raise ConversionError("the document converter is not installed on the server")
 
     args = [_osascript(), str(SCRIPT), str(src), str(dst)]
     log.info("converting %s -> %s", src.name, dst.name)
@@ -177,11 +240,26 @@ def office_licensed() -> bool:
 
 def office_status() -> dict:
     """Everything /health needs to say whether Office printing will work."""
+    if backend() == "libreoffice":
+        binary = _libreoffice()
+        present = bool(binary and shutil.which(binary))
+        return {
+            "backend": "libreoffice",
+            "enabled": settings.office_conversion_enabled,
+            "available": settings.office_conversion_enabled and present,
+            "gui_session": False,
+            "requires_gui": False,
+            "script_present": False,
+            "licensed": False,
+            "apps": {"LibreOffice": present},
+        }
     apps = {name: Path(p).exists() for name, p in OFFICE_APPS.items()}
     script_present = SCRIPT.exists()
     runner_present = bool(settings.office_convert_binary) or shutil.which("osascript") is not None
     licensed = office_licensed()
     return {
+        "backend": "applescript",
+        "requires_gui": True,
         "enabled": settings.office_conversion_enabled,
         # `licensed` is part of "available" deliberately: an installed but
         # unactivated Word converts nothing, it just hangs for the full timeout.

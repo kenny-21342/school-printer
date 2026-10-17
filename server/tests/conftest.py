@@ -50,6 +50,21 @@ def env(tmp_path, monkeypatch):
     lp.write_text(FAKE_LP)
     lp.chmod(lp.stat().st_mode | stat.S_IEXEC)
 
+    # Never let cancellation or status checks reach the developer's real CUPS.
+    # Some Linux installations do not have these CLI tools at all.
+    cups_bin = tmp_path / "cups-bin"
+    cups_bin.mkdir()
+    for name, script in {
+        "cancel": '#!/bin/sh\nprintf "%s\\n" "$@" >> "$CANCEL_ARGV_LOG"\nexit 0\n',
+        "lpstat": "#!/bin/sh\nexit 1\n",
+        "lpoptions": "#!/bin/sh\necho 'PageSize/Media Size: *A4 Letter'\n",
+    }.items():
+        tool = cups_bin / name
+        tool.write_text(script)
+        tool.chmod(0o755)
+    monkeypatch.setenv("PATH", str(cups_bin) + os.pathsep + os.environ.get("PATH", ""))
+    monkeypatch.setenv("CANCEL_ARGV_LOG", str(tmp_path / "cancel-args"))
+
     argv_log = tmp_path / "lp_argv.log"
     argv_log.touch()
 
@@ -73,6 +88,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("SP_SPOOL_RETENTION_HOURS", "24")
     monkeypatch.setenv("LP_ARGV_LOG", str(argv_log))
     monkeypatch.setenv("SP_OFFICE_CONVERT_BINARY", str(osa))
+    monkeypatch.setenv("SP_OFFICE_BACKEND", "applescript")
     monkeypatch.setenv("OSA_ARGV_LOG", str(osa_argv_log))
     # The worker thread is not started in tests; they call
     # main.run_conversions_once() so conversion happens at a known moment.

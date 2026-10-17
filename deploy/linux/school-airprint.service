@@ -1,0 +1,29 @@
+[Unit]
+Description=School Print per-student AirPrint proxy
+Wants=network-online.target school-printer.service avahi-daemon.service
+After=network-online.target cups.service school-printer.service avahi-daemon.service
+
+[Service]
+Type=simple
+User=school-printer
+Group=school-printer
+WorkingDirectory=@INSTALL_DIR@
+EnvironmentFile=@INSTALL_DIR@/.env
+Environment=SHIM_STATE_DIR=@INSTALL_DIR@/data/airprint
+Environment=SHIM_LOG=@INSTALL_DIR@/logs/airprint-shim.log
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=HOME=@INSTALL_DIR@/data
+ExecStart=@INSTALL_DIR@/venv/bin/python @INSTALL_DIR@/airprint-shim/shim.py
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@INSTALL_DIR@/data @INSTALL_DIR@/logs
+
+[Install]
+WantedBy=multi-user.target

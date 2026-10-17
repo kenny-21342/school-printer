@@ -31,6 +31,7 @@ import http.client
 import json
 import os
 import signal
+import shutil
 import sys
 import time
 import urllib.error
@@ -39,11 +40,12 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ipp  # noqa: E402
 
-PUBLIC_PORT = 8631
-BACKEND_PORT = 8632
+PUBLIC_PORT = int(os.environ.get("SHIM_PORT", os.environ.get("SP_AIRPRINT_PORT", "8631")))
+BACKEND_PORT = int(os.environ.get("SHIM_BACKEND_PORT", "8632"))
 BACKEND_URI = f"ipp://localhost:{BACKEND_PORT}/ipp/print"
 NAME = "School Print"
 HERE = os.path.dirname(os.path.abspath(__file__))
+STATE_DIR = os.environ.get("SHIM_STATE_DIR", HERE)
 URF = "CP1,IS1-4-5-19,MT1-2-3-4-5-6,RS600,V1.4,W8,DM1"
 TXT = [
     "txtvers=1", "qtotal=1", "rp=ipp/print", f"ty={NAME}", f"product=({NAME})",
@@ -58,6 +60,23 @@ _cache: dict[str, tuple[float, str | None]] = {}     # token -> (expires, school
 _recent: dict[str, collections.deque] = collections.defaultdict(collections.deque)
 HOP = {"connection", "keep-alive", "transfer-encoding", "upgrade", "te",
        "proxy-connection", "expect", "content-length"}
+
+
+def advertisement_command() -> list[str]:
+    if sys.platform == "darwin":
+        return [shutil.which("dns-sd") or "/usr/bin/dns-sd", "-R", NAME,
+                "_ipp._tcp,_universal", "local", str(PUBLIC_PORT), *TXT]
+    return [shutil.which("avahi-publish-service") or "avahi-publish-service",
+            "--no-fail", "--subtype=_universal._sub._ipp._tcp",
+            NAME, "_ipp._tcp", str(PUBLIC_PORT), *TXT]
+
+
+def backend_command(spool: str) -> list[str]:
+    return [shutil.which("ippeveprinter") or "/usr/bin/ippeveprinter",
+            "-n", "localhost", "-p", str(BACKEND_PORT), "-d", spool,
+            "-c", os.path.join(HERE, "print-job.sh"), "-f", "application/pdf,image/urf",
+            "-2", "-s", "20", "-r", "_internal" if sys.platform == "darwin" else "off",
+            "-M", "School", "-m", "Print", f"{NAME} backend"]
 
 
 def resolve(token: str) -> str | None:
@@ -83,10 +102,10 @@ def open_owner() -> str | None:
     `off` must mean off: without this check the path stays reachable by address
     (a profile, or "Add Printer" by IP) after the Bonjour entry is withdrawn.
     """
-    if not os.path.exists(os.path.join(HERE, "bonjour.on")):
+    if not os.path.exists(os.path.join(STATE_DIR, "bonjour.on")):
         return None
     try:
-        with open(os.path.join(HERE, "owner")) as fh:
+        with open(os.path.join(STATE_DIR, "owner")) as fh:
             return fh.read().strip() or None
     except OSError:
         return None
@@ -205,7 +224,7 @@ async def bonjour_loop():
     Bonjour entry is the one anyone on the network could see, so it is a switch
     (tools/school-print on|off) and not a default.
     """
-    flag, proc = os.path.join(HERE, "bonjour.on"), None
+    flag, proc = os.path.join(STATE_DIR, "bonjour.on"), None
     try:
         while True:
             want = os.path.exists(flag) and open_owner() is not None
@@ -213,8 +232,7 @@ async def bonjour_loop():
                 proc = None
             if want and proc is None:
                 proc = await asyncio.create_subprocess_exec(
-                    "/usr/bin/dns-sd", "-R", NAME, "_ipp._tcp,_universal", "local",
-                    str(PUBLIC_PORT), *TXT, stdout=asyncio.subprocess.DEVNULL)
+                    *advertisement_command(), stdout=asyncio.subprocess.DEVNULL)
             elif not want and proc is not None:
                 proc.terminate()
                 await proc.wait()
@@ -223,33 +241,49 @@ async def bonjour_loop():
     finally:
         if proc is not None and proc.returncode is None:
             proc.terminate()
+            await proc.wait()
 
 
 async def main():
-    spool = os.path.join(HERE, "spool")
+    spool = os.path.join(STATE_DIR, "spool")
     os.makedirs(spool, exist_ok=True)
-    backend = await asyncio.create_subprocess_exec(
-        "/usr/bin/ippeveprinter", "-n", "localhost", "-p", str(BACKEND_PORT), "-d", spool,
-        "-c", os.path.join(HERE, "print-job.sh"), "-f", "application/pdf,image/urf",
-        "-2", "-s", "20", "-r", "_internal", "-M", "School", "-m", "Print",
-        f"{NAME} backend")
-    await asyncio.sleep(2)
-    # asyncio makes a "::" socket IPv6-only, so name both families explicitly:
-    # profile-installed printers connect to a plain IPv4 address.
-    server = await asyncio.start_server(handle, ["0.0.0.0", "::"], PUBLIC_PORT)
-    print(f"listening on {PUBLIC_PORT}, backend {BACKEND_PORT}", flush=True)
-    bonjour = asyncio.create_task(bonjour_loop())
-    done, _ = await asyncio.wait(
-        [asyncio.create_task(backend.wait()), bonjour,
-         asyncio.create_task(server.serve_forever())],
-        return_when=asyncio.FIRST_COMPLETED)
-    bonjour.cancel()
-    await asyncio.gather(bonjour, return_exceptions=True)
-    if backend.returncode is None:
-        backend.terminate()
-    return 1
+    backend = await asyncio.create_subprocess_exec(*backend_command(spool))
+    tasks, server = [], None
+    try:
+        await asyncio.sleep(2)
+        if backend.returncode is not None:
+            raise RuntimeError(f"IPP backend exited with {backend.returncode}")
+        # asyncio makes a "::" socket IPv6-only, so name both families explicitly.
+        server = await asyncio.start_server(handle, ["0.0.0.0", "::"], PUBLIC_PORT)
+        print(f"listening on {PUBLIC_PORT}, backend {BACKEND_PORT}", flush=True)
+        tasks = [asyncio.create_task(backend.wait()), asyncio.create_task(bonjour_loop()),
+                 asyncio.create_task(server.serve_forever())]
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()  # surface failures to the supervisor
+        return 1
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+        if backend.returncode is None:
+            backend.terminate()
+        await backend.wait()
+
+
+async def supervised_main():
+    task = asyncio.create_task(main())
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, task.cancel)
+    try:
+        return await task
+    except asyncio.CancelledError:
+        return 0
 
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
-    sys.exit(asyncio.run(main()))
+    sys.exit(asyncio.run(supervised_main()))
