@@ -15,7 +15,6 @@ if [[ ! $user =~ ^[A-Za-z0-9._-]{2,64}$ ]]; then
   echo "ATTR: job-state-message=No school account for this job" >&2
   exit 1
 fi
-owner_args=(-h "${SHIM_CUPS_SERVER:-${SP_CUPS_SERVER:-localhost:631}}" -U "$user")
 
 # Only PDF is passed through. iOS sends PDF when the printer lists it; a raster
 # URF job would need converting first, so refuse it loudly instead of printing junk.
@@ -24,6 +23,22 @@ if [[ ${CONTENT_TYPE:-application/pdf} != application/pdf ]]; then
   echo "ATTR: job-state-message=Only PDF is supported" >&2
   exit 1
 fi
+
+# Direct route (SP_PRINT_BACKEND=lpd): no CUPS queue or vendor driver; the relay's
+# own LPD/PJL client sends the job to the campus printer under $user. A zero exit
+# means the printer accepted it (Follow-Me then holds it for release).
+if [[ ${SP_PRINT_BACKEND:-cups} == lpd ]]; then
+  paper=
+  case ${IPP_MEDIA:-} in iso_a4*) paper=A4 ;; na_letter*) paper=Letter ;; esac
+  server=${SHIM_SERVER_DIR:-$(dirname "$0")/../server}
+  out=$(cd "$server" && "${SHIM_PYTHON:-python3}" -m app.lpd_cli --user "$user" \
+        --title "${IPP_JOB_NAME:-AirPrint}" --copies "${IPP_COPIES:-1}" \
+        --sides "${IPP_SIDES:-one-sided}" ${paper:+--paper "$paper"} "$1" 2>&1); rc=$?
+  echo "lpd rc=$rc: $out" >> "$LOG"
+  [[ $rc == 0 ]] || echo "ATTR: job-state-message=$out" >&2
+  exit $rc
+fi
+owner_args=(-h "${SHIM_CUPS_SERVER:-${SP_CUPS_SERVER:-localhost:631}}" -U "$user")
 
 args=("${owner_args[@]}" -d "$QUEUE" -t "${IPP_JOB_NAME:-AirPrint}" -n "${IPP_COPIES:-1}")
 case ${IPP_SIDES:-} in

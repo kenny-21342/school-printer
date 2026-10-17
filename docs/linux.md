@@ -278,3 +278,25 @@ Approving a student exports their Shortcut over ssh, signs it **on the Mac**
 file on the iMac with `school-print store-shortcut`. If signing fails the profile
 still works; `school-print shortcut <id>` retries. `tools/test-school-print.sh`
 tests all of this against a fake ssh and never touches the iMac.
+
+## Direct LPD printing (no vendor driver)
+
+The Fujifilm driver exists only for macOS, so a Linux queue may not be possible.
+`SP_PRINT_BACKEND=lpd` in `/opt/school-printer/.env` skips CUPS entirely: the relay
+converts the PDF to PostScript (`pdftops`, or Ghostscript as a fallback; on Arch
+`pacman -S poppler`) and speaks LPD with a PJL job header to `SP_LPD_HOST:515`,
+queue `SP_LPD_QUEUE` (defaults `10.2.20.170`, `sjbw`). The protocol is from
+[paoprint](https://github.com/PaoDevelopers/paokit) (BSD-2-Clause, Runxi Yu); this
+version never sends a password, and sanitises the job name and user so a student
+cannot inject LPD/PJL lines.
+
+Limits: PDF and PostScript only; one contiguous page range; a job counts as done
+once the printer accepts it and cannot be cancelled afterwards. With this backend
+`configure-queue-linux.sh` is not needed, but `deploy-linux.sh` still insists on a
+configured queue; relax that check before installing without one.
+
+Inspect exactly what would be sent, without sending: 
+`cd /opt/school-printer/server && ../venv/bin/python -m app.lpd_cli --dump --user s21342 file.pdf | less`.
+
+Unverified at the campus printer: `SIMPLEX` for one-sided, empty `@JOEP`. Print one
+page released under your own account before relying on it.

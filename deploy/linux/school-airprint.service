@@ -11,6 +11,12 @@ WorkingDirectory=@INSTALL_DIR@
 EnvironmentFile=@INSTALL_DIR@/.env
 Environment=SHIM_STATE_DIR=@INSTALL_DIR@/data/airprint
 Environment=SHIM_LOG=@INSTALL_DIR@/logs/airprint-shim.log
+Environment=SHIM_PYTHON=@INSTALL_DIR@/venv/bin/python
+Environment=SP_BASE_DIR=@INSTALL_DIR@
+Environment=SP_DATA_DIR=@INSTALL_DIR@/data
+Environment=SP_SPOOL_DIR=@INSTALL_DIR@/spool
+Environment=SP_DB_PATH=@INSTALL_DIR@/data/printers.db
+Environment=SHIM_SERVER_DIR=@INSTALL_DIR@/server
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=HOME=@INSTALL_DIR@/data
 ExecStart=@INSTALL_DIR@/venv/bin/python @INSTALL_DIR@/airprint-shim/shim.py

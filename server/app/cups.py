@@ -78,6 +78,21 @@ SCALING_VALUES = {
 }
 
 
+def _submit_lpd(spool_path: str, ps: "PrintSettings", job_title: str, owner: str | None) -> tuple[int, str]:
+    """The lpd backend: straight to the campus printer, no CUPS in the path."""
+    from pathlib import Path
+    from . import lpd
+    if not owner:
+        raise RuntimeError("direct printing needs the school account to release the job under")
+    try:
+        number = lpd.print_pdf(
+            Path(spool_path), user=owner, title=job_title, copies=max(1, ps.copies), duplex=ps.duplex,
+            paper=ps.paper_size or None, page_range=ps.page_range)
+    except lpd.LpdError as e:
+        raise RuntimeError(str(e)) from e
+    return number, f"lpd job {number} accepted by {settings.lpd_host}"
+
+
 def submit_job(
     spool_path: str,
     *,
@@ -90,6 +105,8 @@ def submit_job(
     Returns (cups_job_id, raw_lp_output). Raises RuntimeError on failure.
     """
     ps = settings_obj or PrintSettings()
+    if settings.print_backend == "lpd":
+        return _submit_lpd(spool_path, ps, job_title, owner)
     lp = _lp()
     args = [lp]
     if owner:
@@ -177,6 +194,8 @@ def queue_options() -> list[str]:
     print-options UI would be controlling nothing. Surfaced via /health so it
     can be checked without logging into the print server.
     """
+    if settings.print_backend == "lpd":
+        return ["lpd"]      # not a CUPS queue, so there is nothing raw to warn about
     try:
         proc = subprocess.run(
             [_tool("lpoptions"), "-p", settings.cups_queue, "-l"],
@@ -195,6 +214,8 @@ def queue_options() -> list[str]:
 
 
 def cancel_job(job_id: int) -> bool:
+    if settings.print_backend == "lpd":
+        return False        # once the printer has the job it sits in the campus queue; nothing to cancel here
     """Cancel a single CUPS job.
 
     NOTE: this must NOT pass `-a`. In CUPS `cancel -a` means "cancel every job
@@ -210,6 +231,8 @@ def cancel_job(job_id: int) -> bool:
 
 def get_job_state(job_id: int) -> str:
     """Return current state of a CUPS job: pending|processing|done|cancelled|error|unknown."""
+    if settings.print_backend == "lpd":
+        return "done"       # the printer accepted it; Follow-Me holds it until the student releases it
     lpstat = _tool("lpstat")
     proc = subprocess.run(
         [lpstat, "-o", settings.cups_queue, "-W", "not-completed"],

@@ -31,6 +31,16 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 10080  # 7 days
 
     # --- printing ---
+    # "cups" hands jobs to a local CUPS queue (needs the campus printer's vendor
+    # driver, which exists only for macOS). "lpd" speaks LPD + PJL straight to
+    # the printer itself (lpd.py) and needs only PDF -> PostScript conversion.
+    print_backend: Literal["cups", "lpd"] = "cups"
+    lpd_host: str = "10.2.20.170"
+    lpd_port: int = 515
+    lpd_queue: str = "sjbw"
+    lpd_timeout_s: int = 30
+    # pdftops (poppler) for the lpd backend. Empty = discover pdftops, then Ghostscript.
+    pdftops_binary: str = ""
     cups_queue: str = "bw"
     # Override the lp binary path (for tests). Empty = auto-discover.
     lp_binary: str = ""
