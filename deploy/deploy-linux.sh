@@ -37,8 +37,13 @@ print(queue)
 PY
 )"
 [[ $QUEUE =~ ^[A-Za-z0-9_.-]+$ ]] || { echo 'Invalid SP_CUPS_QUEUE.' >&2; exit 1; }
-lpstat -h localhost:631 -p "$QUEUE" >/dev/null || { echo "Configure Linux queue '$QUEUE' first; see docs/linux.md." >&2; exit 1; }
-[[ -n $(lpoptions -h localhost:631 -p "$QUEUE" -l) ]] || { echo "'$QUEUE' needs a Linux driver; a raw queue is not sufficient." >&2; exit 1; }
+PRINT_BACKEND="${PRINT_BACKEND:-cups}"
+[[ $PRINT_BACKEND == cups || $PRINT_BACKEND == lpd ]] || { echo 'PRINT_BACKEND must be cups or lpd.' >&2; exit 1; }
+if [[ $PRINT_BACKEND == lpd ]]; then
+  command -v pdftops >/dev/null || command -v gs >/dev/null || { echo 'lpd needs poppler (pdftops) or ghostscript.' >&2; exit 1; }
+fi
+[[ $PRINT_BACKEND == lpd ]] || lpstat -h localhost:631 -p "$QUEUE" >/dev/null || { echo "Configure Linux queue '$QUEUE' first; see docs/linux.md." >&2; exit 1; }
+[[ $PRINT_BACKEND == lpd || -n $(lpoptions -h localhost:631 -p "$QUEUE" -l) ]] || { echo "'$QUEUE' needs a Linux driver; a raw queue is not sufficient." >&2; exit 1; }
 getent group school-printer >/dev/null || groupadd --system school-printer
 id school-printer >/dev/null 2>&1 || useradd --system --gid school-printer --home-dir "$INSTALL_DIR/data" --shell /usr/bin/nologin school-printer
 install -d -m 755 "$INSTALL_DIR"
@@ -67,11 +72,14 @@ text = pathlib.Path(sys.argv[1]).read_text()
 pathlib.Path(sys.argv[2]).write_text(text.replace('SP_BOOTSTRAP_ADMIN_PASS=\n', f'SP_BOOTSTRAP_ADMIN_PASS={secrets.token_urlsafe(24)}\n'))
 PY
 fi
+if [[ $PRINT_BACKEND == lpd ]] && ! grep -q '^SP_PRINT_BACKEND=' "$INSTALL_DIR/.env"; then
+  printf 'SP_PRINT_BACKEND=lpd\n' >> "$INSTALL_DIR/.env"
+fi
 chown school-printer:school-printer "$INSTALL_DIR/.env"
 chmod 600 "$INSTALL_DIR/.env"
 
 # Keep the underlying unauthenticated route closed. Only the proxy is public.
-lpadmin -p "$QUEUE" -o printer-is-shared=false
+[[ $PRINT_BACKEND == lpd ]] || lpadmin -p "$QUEUE" -o printer-is-shared=false
 cupsctl --no-share-printers
 for unit in school-printer school-airprint; do
   sed "s|@INSTALL_DIR@|$INSTALL_DIR|g" "$ROOT/deploy/linux/$unit.service" > "/etc/systemd/system/$unit.service"
