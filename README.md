@@ -1,5 +1,7 @@
 # School Print
 
+**Current state and limitations: [docs/status.md](docs/status.md)** (project closed 2026-10-20; direct LPD printing, single user).
+
 **Moving the iMac to Arch Linux + Hyprland:** follow [the Linux setup and
 migration guide](docs/linux.md). It includes a live-state backup command,
 headless LibreOffice conversion, systemd services, and Avahi AirPrint publishing.
