@@ -76,7 +76,7 @@ profile contains it.
 ## Native IPP rollout (the underlying queue)
 
 > **Sharing is now off.** On 7 Oct a device sent a job to the shared `bw @ iMac`
-> queue under the name `lucaslu`, which its owner says he did not print. The
+> queue under another student's name, which that student says they did not print. The
 > shared queue has no way to tell who is who, so it was unshared
 > (`lpadmin -p bw -o printer-is-shared=false`, `cupsctl --no-share-printers`; the
 > prior config is in `~/school-printer-backups/unshare-*`). The relay and shim

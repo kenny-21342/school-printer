@@ -1,6 +1,6 @@
 """Command-line front end for lpd.py, used by the AirPrint shim's print command.
 
-    python -m app.lpd_cli --user s21342 --title Homework [--copies 2] [--sides two-sided-long-edge] file.pdf
+    python -m app.lpd_cli --user s12345 --title Homework [--copies 2] [--sides two-sided-long-edge] file.pdf
     python -m app.lpd_cli --dump ...        # write the exact byte stream to stdout, send nothing
 
 Exit status 0 on success, 1 with the reason on stderr otherwise.

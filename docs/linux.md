@@ -296,7 +296,7 @@ once the printer accepts it and cannot be cancelled afterwards. With this backen
 configured queue; relax that check before installing without one.
 
 Inspect exactly what would be sent, without sending: 
-`cd /opt/school-printer/server && ../venv/bin/python -m app.lpd_cli --dump --user s21342 file.pdf | less`.
+`cd /opt/school-printer/server && ../venv/bin/python -m app.lpd_cli --dump --user s12345 file.pdf | less`.
 
 Unverified at the campus printer: `SIMPLEX` for one-sided, empty `@JOEP`. Print one
 page released under your own account before relying on it.
